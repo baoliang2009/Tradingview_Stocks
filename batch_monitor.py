@@ -199,8 +199,9 @@ def batch_monitor_stocks(board_filter=None, max_stocks=None, random_sample=False
     # 随机采样
     if random_sample and max_stocks and max_stocks < len(stock_list):
         stock_list = random.sample(stock_list, max_stocks)
-    elif max_stocks:
+    elif max_stocks and max_stocks < len(stock_list):
         stock_list = stock_list[:max_stocks]
+    # 如果 max_stocks 为 None，则使用全部股票列表
     
     board_name = {
         'chinext': '创业板',
@@ -479,8 +480,8 @@ if __name__ == "__main__":
     parser.add_argument('--board', type=str, default='chinext+star', 
                         choices=['chinext', 'star', 'chinext+star', 'all'],
                         help='板块筛选: chinext(创业板), star(科创板), chinext+star(创业板+科创板), all(全部A股)')
-    parser.add_argument('--max-stocks', type=int, default=20, 
-                        help='最大监控股票数量，默认20只用于测试')
+    parser.add_argument('--max-stocks', type=str, default='20', 
+                        help='最大监控股票数量，默认20只用于测试，使用 "all" 监控全部股票')
     parser.add_argument('--random', action='store_true', 
                         help='是否随机采样股票')
     parser.add_argument('--no-strict', action='store_true',
@@ -498,6 +499,12 @@ if __name__ == "__main__":
     
     strict_mode = not args.no_strict
     
+    # 处理 max_stocks 参数
+    if args.max_stocks.lower() == 'all':
+        max_stocks = None  # None 表示不限制数量
+    else:
+        max_stocks = int(args.max_stocks)
+    
     # 单只股票测试模式
     if args.stock:
         test_single_stock_simple(
@@ -513,7 +520,7 @@ if __name__ == "__main__":
         
         batch_monitor_stocks(
             board_filter=board_filter,
-            max_stocks=args.max_stocks,
+            max_stocks=max_stocks,
             random_sample=args.random,
             strict_mode=strict_mode,
             min_quality=args.min_quality,
