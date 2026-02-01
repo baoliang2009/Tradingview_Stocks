@@ -21,6 +21,7 @@
 - 批量监控：扫描整个市场
 - 单股测试：深度分析单只股票
 - 对比分析：标准模式vs严格模式
+- 回测系统：验证策略有效性（新增）
 
 ## 快速开始
 
@@ -41,6 +42,9 @@ python batch_monitor.py --stock 300750
 
 # 详细分析单只股票
 python single_stock_test.py 300750 --details
+
+# 回测策略（新增）
+python backtest.py --max-stocks 100 --quality-thresholds 60,70,80
 ```
 
 ## 使用指南
@@ -190,6 +194,38 @@ python compare_modes.py
 - 信号减少比例
 - 严格模式的平均质量分数
 
+### 4. 回测系统（新增）
+
+验证策略在不同质量阈值下的表现。
+
+```bash
+# 基本回测（100只股票，测试多个质量阈值）
+python backtest.py
+
+# 自定义回测配置
+python backtest.py --board chinext+star --max-stocks 200 \
+  --quality-thresholds 60,70,80
+
+# 全面回测
+python backtest.py --board all --max-stocks 500 \
+  --quality-thresholds 50,60,70,75,80 --history-days 300
+```
+
+**回测功能**：
+- ✅ 多质量阈值对比（如 60分 vs 70分 vs 80分）
+- ✅ 详细性能指标（胜率、盈亏比、夏普比率、最大回撤等）
+- ✅ 真实交易成本模拟（手续费、滑点）
+- ✅ CSV格式结果导出
+- ✅ 自动生成对比分析表格
+
+**回测指标**：
+- 总交易次数、胜率
+- 平均收益、累计收益
+- 最大回撤、夏普比率
+- 盈亏比、平均持有天数
+
+详细使用请查看 [BACKTEST_GUIDE.md](BACKTEST_GUIDE.md)
+
 ## 策略说明
 
 ### 核心策略：QQE + Trend
@@ -234,11 +270,14 @@ python compare_modes.py
 | `qqe_trend_strategy.py` | 核心策略算法 |
 | `batch_monitor.py` | 批量监控和单股快速测试 |
 | `single_stock_test.py` | 单股详细分析工具 |
+| `backtest.py` | 回测系统（新增） |
 | `compare_modes.py` | 标准模式vs严格模式对比 |
 | `test_baostock.py` | 数据接口测试 |
 | `STRATEGY_OPTIMIZATION.md` | 策略优化详细说明 |
 | `SINGLE_STOCK_GUIDE.md` | 单股测试使用指南 |
+| `BACKTEST_GUIDE.md` | 回测系统使用指南（新增） |
 | `PARAMETERS.md` | 参数详细说明和使用示例 |
+| `SCAN_ALL_STOCKS.md` | 监控所有股票使用指南 |
 
 ## 使用建议
 
@@ -312,6 +351,15 @@ A: 使用baostock提供的免费A股数据，后复权价格。
 - ⚠️ 使用本系统产生的任何损失，开发者不承担责任
 
 ## 更新日志
+
+### v2.3 (2026-02-01)
+- ✅ 新增完整回测系统 `backtest.py`
+- ✅ 支持多质量阈值对比回测
+- ✅ 详细性能指标分析（胜率、盈亏比、夏普比率、最大回撤等）
+- ✅ 真实交易成本模拟（手续费、滑点）
+- ✅ CSV格式结果导出
+- ✅ 新增 BACKTEST_GUIDE.md 使用指南
+- ✅ 支持监控所有股票（--max-stocks all）
 
 ### v2.2 (2026-02-01)
 - ✅ 新增 `--all-signals` 参数：显示所有买入卖出信号记录
