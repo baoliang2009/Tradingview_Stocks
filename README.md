@@ -21,7 +21,7 @@
 - 批量监控：扫描整个市场
 - 单股测试：深度分析单只股票
 - 对比分析：标准模式vs严格模式
-- 回测系统：验证策略有效性（新增）
+- 回测系统：验证策略有效性，支持止损（v2.3）
 
 ## 快速开始
 
@@ -43,8 +43,8 @@ python batch_monitor.py --stock 300750
 # 详细分析单只股票
 python single_stock_test.py 300750 --details
 
-# 回测策略（新增）
-python backtest.py --max-stocks 100 --quality-thresholds 60,70,80
+# 回测策略（v2.3新增止损功能）
+python backtest.py --max-stocks 100 --quality-thresholds 60,70,80 --stop-loss 0.10
 ```
 
 ## 使用指南
@@ -223,8 +223,9 @@ python backtest.py --board all --max-stocks 500 \
 - 平均收益、累计收益
 - 最大回撤、夏普比率
 - 盈亏比、平均持有天数
+- **止损统计**（v2.3新增）：止损次数、止损率、退出原因分析
 
-详细使用请查看 [BACKTEST_GUIDE.md](BACKTEST_GUIDE.md)
+详细使用请查看 [BACKTEST_GUIDE.md](BACKTEST_GUIDE.md) 和 [STOP_LOSS_GUIDE.md](STOP_LOSS_GUIDE.md)
 
 ## 策略说明
 
@@ -270,14 +271,16 @@ python backtest.py --board all --max-stocks 500 \
 | `qqe_trend_strategy.py` | 核心策略算法 |
 | `batch_monitor.py` | 批量监控和单股快速测试 |
 | `single_stock_test.py` | 单股详细分析工具 |
-| `backtest.py` | 回测系统（新增） |
+| `backtest.py` | 回测系统（v2.3支持止损） |
 | `compare_modes.py` | 标准模式vs严格模式对比 |
 | `test_baostock.py` | 数据接口测试 |
 | `STRATEGY_OPTIMIZATION.md` | 策略优化详细说明 |
 | `SINGLE_STOCK_GUIDE.md` | 单股测试使用指南 |
-| `BACKTEST_GUIDE.md` | 回测系统使用指南（新增） |
+| `BACKTEST_GUIDE.md` | 回测系统使用指南 |
+| `STOP_LOSS_GUIDE.md` | 止损功能详细说明（v2.3新增） |
 | `PARAMETERS.md` | 参数详细说明和使用示例 |
 | `SCAN_ALL_STOCKS.md` | 监控所有股票使用指南 |
+| `UPDATE_V2.3.md` | v2.3版本更新说明 |
 
 ## 使用建议
 

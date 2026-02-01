@@ -16,7 +16,7 @@ class BacktestEngine:
     """回测引擎"""
     
     def __init__(self, initial_capital=100000, commission=0.0003, 
-                 slippage=0.001, position_size=1.0):
+                 slippage=0.001, position_size=1.0, stop_loss=0.10):
         """
         初始化回测引擎
         
@@ -25,16 +25,18 @@ class BacktestEngine:
             commission: 手续费率（双向）
             slippage: 滑点
             position_size: 仓位比例（0-1）
+            stop_loss: 止损比例（如 0.10 表示 -10%）
         """
         self.initial_capital = initial_capital
         self.commission = commission
         self.slippage = slippage
         self.position_size = position_size
+        self.stop_loss = stop_loss
         
         # 回测结果
         self.trades = []
         self.equity_curve = []
-        
+    
     def backtest_stock(self, stock_code, stock_name, stock_data, 
                       strict_mode=True, min_quality=60):
         """
@@ -73,20 +75,47 @@ class BacktestEngine:
                 # 计算买入成本（含滑点和手续费）
                 buy_cost = buy_price * (1 + self.slippage + self.commission)
                 
-                # 找到卖出信号
-                future_sells = sell_signals[sell_signals.index > buy_date]
+                # 获取买入后的所有数据
+                future_data = result[result.index > buy_date]
                 
-                if len(future_sells) > 0:
-                    sell_date = future_sells.index[0]
-                    sell_price = result.loc[sell_date, 'open']
-                    # 计算卖出价格（含滑点和手续费）
-                    sell_net = sell_price * (1 - self.slippage - self.commission)
-                    status = 'closed'
-                else:
+                if len(future_data) == 0:
+                    continue
+                
+                # 检查止损和卖出信号
+                sell_date = None
+                sell_price = None
+                exit_reason = None
+                
+                for date, row in future_data.iterrows():
+                    # 计算当前收益率
+                    current_price = row['low']  # 使用最低价检查止损
+                    current_return = (current_price - buy_cost) / buy_cost
+                    
+                    # 止损检查
+                    if current_return <= -self.stop_loss:
+                        sell_date = date
+                        sell_price = current_price  # 止损价
+                        exit_reason = 'stop_loss'
+                        break
+                    
+                    # 卖出信号检查
+                    if date in sell_signals.index:
+                        sell_date = date
+                        sell_price = row['open']  # 使用开盘价卖出
+                        exit_reason = 'signal'
+                        break
+                
+                # 如果没有触发止损或卖出信号，持有到最后
+                if sell_date is None:
                     sell_date = result.index[-1]
                     sell_price = result.iloc[-1]['close']
-                    sell_net = sell_price * (1 - self.slippage - self.commission)
+                    exit_reason = 'open'
                     status = 'open'
+                else:
+                    status = 'closed'
+                
+                # 计算卖出价格（含滑点和手续费）
+                sell_net = sell_price * (1 - self.slippage - self.commission)
                 
                 # 计算收益
                 profit_pct = (sell_net - buy_cost) / buy_cost * 100
@@ -104,6 +133,7 @@ class BacktestEngine:
                     'profit_pct': profit_pct,
                     'holding_days': holding_days,
                     'signal_quality': signal_quality,
+                    'exit_reason': exit_reason,
                     'status': status
                 }
                 
@@ -132,6 +162,17 @@ class BacktestEngine:
         # 基本统计
         total_trades = len(df)
         closed_trades = df[df['status'] == 'closed']
+        
+        # 止损统计
+        if 'exit_reason' in df.columns:
+            stop_loss_trades = df[df['exit_reason'] == 'stop_loss']
+            stop_loss_count = len(stop_loss_trades)
+            stop_loss_rate = stop_loss_count / total_trades * 100 if total_trades > 0 else 0
+            signal_exit_count = len(df[df['exit_reason'] == 'signal'])
+        else:
+            stop_loss_count = 0
+            stop_loss_rate = 0
+            signal_exit_count = 0
         
         # 收益统计
         profits = df['profit_pct'].values
@@ -190,7 +231,10 @@ class BacktestEngine:
             'avg_quality': avg_quality,
             'cumulative_return': cumulative_return,
             'max_drawdown': max_drawdown,
-            'sharpe_ratio': sharpe_ratio
+            'sharpe_ratio': sharpe_ratio,
+            'stop_loss_count': stop_loss_count,
+            'stop_loss_rate': stop_loss_rate,
+            'signal_exit_count': signal_exit_count
         }
         
         return metrics
@@ -307,7 +351,7 @@ class StockDataLoader:
 
 
 def run_backtest(board='chinext+star', max_stocks=100, quality_thresholds=None,
-                strict_mode=True, history_days=250, delay=0.1):
+                strict_mode=True, history_days=250, stop_loss=0.10, delay=0.1):
     """
     运行回测
     
@@ -317,6 +361,7 @@ def run_backtest(board='chinext+star', max_stocks=100, quality_thresholds=None,
         quality_thresholds: 质量阈值列表
         strict_mode: 是否使用严格模式
         history_days: 历史数据天数
+        stop_loss: 止损比例（如 0.10 表示 -10%）
         delay: 请求间隔
     """
     print("=" * 100)
@@ -326,6 +371,7 @@ def run_backtest(board='chinext+star', max_stocks=100, quality_thresholds=None,
     print(f"股票数量: {max_stocks}")
     print(f"模式: {'严格模式' if strict_mode else '标准模式'}")
     print(f"历史数据: {history_days}天")
+    print(f"止损设置: {stop_loss * 100:.0f}%")
     print(f"质量阈值: {quality_thresholds}")
     print("=" * 100)
     
@@ -346,7 +392,7 @@ def run_backtest(board='chinext+star', max_stocks=100, quality_thresholds=None,
         print(f"开始回测 - 质量阈值: {min_quality}分")
         print(f"{'=' * 100}")
         
-        engine = BacktestEngine()
+        engine = BacktestEngine(stop_loss=stop_loss)
         all_trades = []
         
         for i, stock in enumerate(stock_list, 1):
@@ -404,6 +450,10 @@ def run_backtest(board='chinext+star', max_stocks=100, quality_thresholds=None,
             print(f"夏普比率: {metrics['sharpe_ratio']:.2f}")
             if metrics['avg_quality'] > 0:
                 print(f"平均信号质量: {metrics['avg_quality']:.1f}分")
+            print(f"\n退出方式统计:")
+            print(f"  止损退出: {metrics['stop_loss_count']}次 ({metrics['stop_loss_rate']:.1f}%)")
+            print(f"  信号退出: {metrics['signal_exit_count']}次 ({metrics['signal_exit_count']/metrics['total_trades']*100:.1f}%)")
+            print(f"  持有中: {metrics['total_trades']-metrics['stop_loss_count']-metrics['signal_exit_count']}次")
         else:
             print(f"\n质量阈值 {min_quality}分 没有产生任何交易")
     
@@ -411,12 +461,12 @@ def run_backtest(board='chinext+star', max_stocks=100, quality_thresholds=None,
     print(f"\n\n{'=' * 100}")
     print("不同质量阈值对比分析")
     print(f"{'=' * 100}")
-    print(f"{'质量阈值':<10}{'交易次数':<10}{'胜率%':<10}{'平均收益%':<12}{'累计收益%':<12}{'最大回撤%':<12}{'盈亏比':<10}{'夏普比率':<10}")
+    print(f"{'质量阈值':<10}{'交易次数':<10}{'胜率%':<10}{'平均收益%':<12}{'累计收益%':<12}{'最大回撤%':<12}{'止损率%':<10}{'盈亏比':<10}{'夏普比率':<10}")
     print("-" * 100)
     
     for min_quality in sorted(results.keys()):
         m = results[min_quality]['metrics']
-        print(f"{min_quality:<10}{m['total_trades']:<10}{m['win_rate']:<10.2f}{m['avg_profit']:<12.2f}{m['cumulative_return']:<12.2f}{m['max_drawdown']:<12.2f}{m['profit_factor']:<10.2f}{m['sharpe_ratio']:<10.2f}")
+        print(f"{min_quality:<10}{m['total_trades']:<10}{m['win_rate']:<10.2f}{m['avg_profit']:<12.2f}{m['cumulative_return']:<12.2f}{m['max_drawdown']:<12.2f}{m['stop_loss_rate']:<10.2f}{m['profit_factor']:<10.2f}{m['sharpe_ratio']:<10.2f}")
     
     print("=" * 100)
     
@@ -451,7 +501,10 @@ def save_results(results, board, strict_mode):
             '累计收益%': round(m['cumulative_return'], 2),
             '最大回撤%': round(m['max_drawdown'], 2),
             '夏普比率': round(m['sharpe_ratio'], 2),
-            '平均质量': round(m['avg_quality'], 1) if m['avg_quality'] > 0 else 0
+            '平均质量': round(m['avg_quality'], 1) if m['avg_quality'] > 0 else 0,
+            '止损次数': m['stop_loss_count'],
+            '止损率%': round(m['stop_loss_rate'], 2),
+            '信号退出次数': m['signal_exit_count']
         })
     
     summary_df = pd.DataFrame(summary_data)
@@ -484,6 +537,8 @@ def main():
                         help='使用标准模式（默认使用严格模式）')
     parser.add_argument('--history-days', type=int, default=250,
                         help='历史数据天数')
+    parser.add_argument('--stop-loss', type=float, default=0.10,
+                        help='止损比例，如 0.10 表示 -10% (默认0.10)')
     parser.add_argument('--delay', type=float, default=0.1,
                         help='请求间隔时间(秒)')
     
@@ -501,6 +556,7 @@ def main():
         quality_thresholds=quality_thresholds,
         strict_mode=strict_mode,
         history_days=args.history_days,
+        stop_loss=args.stop_loss,
         delay=args.delay
     )
 
