@@ -65,59 +65,112 @@ class BacktestEngine:
             if strict_mode and min_quality > 0:
                 buy_signals = buy_signals[buy_signals['signal_quality'] >= min_quality]
             
-            # 模拟交易
+            # 模拟交易 - 修正后的逻辑：确保同一时间只持有一个仓位
             stock_trades = []
-            for i in range(len(buy_signals)):
-                buy_date = buy_signals.index[i]
-                buy_price = buy_signals.iloc[i]['open']
-                signal_quality = buy_signals.iloc[i].get('signal_quality', 0) if strict_mode else 0
-                
-                # 计算买入成本（含滑点和手续费）
-                buy_cost = buy_price * (1 + self.slippage + self.commission)
-                
-                # 获取买入后的所有数据
-                future_data = result[result.index > buy_date]
-                
-                if len(future_data) == 0:
-                    continue
-                
-                # 检查止损和卖出信号
-                sell_date = None
-                sell_price = None
-                exit_reason = None
-                
-                for date, row in future_data.iterrows():
-                    # 计算当前收益率
-                    current_price = row['low']  # 使用最低价检查止损
+            current_position = None  # 记录当前持仓
+            
+            # 合并所有日期，按时间顺序处理
+            for date in result.index:
+                # 如果当前有持仓，检查是否需要平仓
+                if current_position is not None:
+                    buy_date = current_position['buy_date']
+                    buy_cost = current_position['buy_cost']
+                    
+                    # 获取当前行数据
+                    row = result.loc[date]
+                    
+                    # 计算当前收益率（用最低价检查止损）
+                    current_price = row['low']
                     current_return = (current_price - buy_cost) / buy_cost
                     
-                    # 止损检查
+                    # 检查止损
                     if current_return <= -self.stop_loss:
                         sell_date = date
-                        sell_price = current_price  # 止损价
+                        sell_price = current_price
                         exit_reason = 'stop_loss'
-                        break
+                        status = 'closed'
+                        
+                        # 平仓
+                        sell_net = sell_price * (1 - self.slippage - self.commission)
+                        profit_pct = (sell_net - buy_cost) / buy_cost * 100
+                        holding_days = (sell_date - buy_date).days
+                        
+                        trade = {
+                            'stock_code': stock_code,
+                            'stock_name': stock_name,
+                            'buy_date': buy_date,
+                            'buy_price': current_position['buy_price'],
+                            'buy_cost': buy_cost,
+                            'sell_date': sell_date,
+                            'sell_price': sell_price,
+                            'sell_net': sell_net,
+                            'profit_pct': profit_pct,
+                            'holding_days': holding_days,
+                            'signal_quality': current_position['signal_quality'],
+                            'exit_reason': exit_reason,
+                            'status': status
+                        }
+                        
+                        stock_trades.append(trade)
+                        current_position = None  # 清空持仓
+                        continue
                     
-                    # 卖出信号检查
+                    # 检查卖出信号
                     if date in sell_signals.index:
                         sell_date = date
-                        sell_price = row['open']  # 使用开盘价卖出
+                        sell_price = row['open']
                         exit_reason = 'signal'
-                        break
+                        status = 'closed'
+                        
+                        # 平仓
+                        sell_net = sell_price * (1 - self.slippage - self.commission)
+                        profit_pct = (sell_net - buy_cost) / buy_cost * 100
+                        holding_days = (sell_date - buy_date).days
+                        
+                        trade = {
+                            'stock_code': stock_code,
+                            'stock_name': stock_name,
+                            'buy_date': buy_date,
+                            'buy_price': current_position['buy_price'],
+                            'buy_cost': buy_cost,
+                            'sell_date': sell_date,
+                            'sell_price': sell_price,
+                            'sell_net': sell_net,
+                            'profit_pct': profit_pct,
+                            'holding_days': holding_days,
+                            'signal_quality': current_position['signal_quality'],
+                            'exit_reason': exit_reason,
+                            'status': status
+                        }
+                        
+                        stock_trades.append(trade)
+                        current_position = None  # 清空持仓
+                        continue
                 
-                # 如果没有触发止损或卖出信号，持有到最后
-                if sell_date is None:
-                    sell_date = result.index[-1]
-                    sell_price = result.iloc[-1]['close']
-                    exit_reason = 'open'
-                    status = 'open'
-                else:
-                    status = 'closed'
+                # 如果当前没有持仓，检查是否有买入信号
+                if current_position is None and date in buy_signals.index:
+                    buy_price = buy_signals.loc[date]['open']
+                    signal_quality = buy_signals.loc[date].get('signal_quality', 0) if strict_mode else 0
+                    buy_cost = buy_price * (1 + self.slippage + self.commission)
+                    
+                    # 建立持仓
+                    current_position = {
+                        'buy_date': date,
+                        'buy_price': buy_price,
+                        'buy_cost': buy_cost,
+                        'signal_quality': signal_quality
+                    }
+            
+            # 如果最后还有持仓，以最后一天的收盘价平仓
+            if current_position is not None:
+                buy_date = current_position['buy_date']
+                buy_cost = current_position['buy_cost']
+                sell_date = result.index[-1]
+                sell_price = result.iloc[-1]['close']
+                exit_reason = 'open'
+                status = 'open'
                 
-                # 计算卖出价格（含滑点和手续费）
                 sell_net = sell_price * (1 - self.slippage - self.commission)
-                
-                # 计算收益
                 profit_pct = (sell_net - buy_cost) / buy_cost * 100
                 holding_days = (sell_date - buy_date).days
                 
@@ -125,14 +178,14 @@ class BacktestEngine:
                     'stock_code': stock_code,
                     'stock_name': stock_name,
                     'buy_date': buy_date,
-                    'buy_price': buy_price,
+                    'buy_price': current_position['buy_price'],
                     'buy_cost': buy_cost,
                     'sell_date': sell_date,
                     'sell_price': sell_price,
                     'sell_net': sell_net,
                     'profit_pct': profit_pct,
                     'holding_days': holding_days,
-                    'signal_quality': signal_quality,
+                    'signal_quality': current_position['signal_quality'],
                     'exit_reason': exit_reason,
                     'status': status
                 }
