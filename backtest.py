@@ -12,9 +12,307 @@ import time
 import random
 
 
+class PortfolioBacktester:
+    """组合回测引擎（资金池模式）"""
+    def __init__(self, initial_capital=100000, max_stocks=5, commission=0.0003, slippage=0.001,
+                 stop_loss=0.10, take_profit=0.20, strict_mode=True):
+        self.initial_capital = initial_capital
+        self.cash = initial_capital
+        self.max_stocks = max_stocks
+        self.commission = commission
+        self.slippage = slippage
+        self.stop_loss = stop_loss
+        self.take_profit = take_profit
+        self.strict_mode = strict_mode
+        
+        self.positions = {}  # {code: {cost, shares, buy_date, ...}}
+        self.trades = []
+        self.equity_curve = []  # [{date, equity, cash, positions_val}]
+        self.daily_logs = []
+
+    def run(self, stock_list, history_days=250, min_quality=60):
+        """执行组合回测"""
+        print(f"\n正在初始化组合回测 (资金: {self.initial_capital}, 最大持仓: {self.max_stocks})...")
+        
+        # 1. 预加载数据并计算信号
+        # 为了按日回测，我们需要将所有股票的数据对齐到同一时间轴
+        # 结构: date -> {code: {open, high, low, close, buy_signal, sell_signal, quality}}
+        market_data = {} 
+        all_dates = set()
+        
+        print("正在预计算策略信号...")
+        valid_stocks = 0
+        for i, stock in enumerate(stock_list):
+            print(f"\r处理进度: {i+1}/{len(stock_list)}", end='', flush=True)
+            try:
+                df = StockDataLoader.get_stock_data(stock['code'], days=history_days)
+                if df is None or len(df) < 60:
+                    continue
+                
+                # 计算策略
+                result = qqe_trend_strategy(df, strict_mode=self.strict_mode)
+                
+                # 提取关键数据存入内存
+                signal_col = 'buy_signal_strict' if self.strict_mode else 'buy_signal'
+                
+                for date, row in result.iterrows():
+                    d_str = date.strftime('%Y-%m-%d')
+                    all_dates.add(d_str)
+                    
+                    if d_str not in market_data:
+                        market_data[d_str] = {}
+                    
+                    market_data[d_str][stock['code']] = {
+                        'name': stock['name'],
+                        'open': row['open'],
+                        'high': row['high'],
+                        'low': row['low'],
+                        'close': row['close'],
+                        'buy_signal': row[signal_col],
+                        'sell_signal': row['sell_signal'],
+                        'quality': row.get('signal_quality', 0) if self.strict_mode else 0
+                    }
+                valid_stocks += 1
+            except Exception:
+                continue
+                
+        print(f"\n预计算完成，有效股票: {valid_stocks}只，开始按日撮合...")
+        
+        # 2. 按日时间步进
+        sorted_dates = sorted(list(all_dates))
+        
+        for date_str in sorted_dates:
+            daily_market = market_data.get(date_str, {})
+            self._process_daily_step(date_str, daily_market, min_quality)
+            
+        return self.equity_curve, self.trades
+
+    def run_with_cache(self, market_data_cache, min_quality=60):
+        """
+        使用预缓存的数据执行组合回测
+        
+        Args:
+            market_data_cache: {code: {name, data: DataFrame}}
+            min_quality: 质量阈值
+        """
+        # 1. 转换数据格式
+        # 目标格式: date -> {code: {open, high, low, close, buy_signal, sell_signal, quality}}
+        market_data = {} 
+        all_dates = set()
+        
+        signal_col = 'buy_signal_strict' if self.strict_mode else 'buy_signal'
+        
+        for code, item in market_data_cache.items():
+            name = item['name']
+            result = item['data']
+            
+            for date, row in result.iterrows():
+                d_str = date.strftime('%Y-%m-%d')
+                all_dates.add(d_str)
+                
+                if d_str not in market_data:
+                    market_data[d_str] = {}
+                
+                market_data[d_str][code] = {
+                    'name': name,
+                    'open': row['open'],
+                    'high': row['high'],
+                    'low': row['low'],
+                    'close': row['close'],
+                    'buy_signal': row[signal_col],
+                    'sell_signal': row['sell_signal'],
+                    'quality': row.get('signal_quality', 0) if self.strict_mode else 0
+                }
+        
+        # 2. 按日时间步进
+        sorted_dates = sorted(list(all_dates))
+        
+        for date_str in sorted_dates:
+            daily_market = market_data.get(date_str, {})
+            self._process_daily_step(date_str, daily_market, min_quality)
+            
+        return self.equity_curve, self.trades
+
+    def _process_daily_step(self, date_str, daily_market, min_quality):
+        """处理每一天的交易逻辑"""
+        # --- 1. 更新持仓市值 & 检查卖出 ---
+        positions_to_close = [] # (code, price, reason)
+        current_positions_value = 0
+        
+        for code, pos in self.positions.items():
+            # 如果该股票今天停牌（无数据），保持持仓不变
+            if code not in daily_market:
+                current_positions_value += pos['shares'] * pos['last_close'] # 用昨收估值
+                continue
+                
+            data = daily_market[code]
+            # 更新最新价格用于估值
+            pos['last_close'] = data['close']
+            
+            # 检查卖出逻辑
+            action = None
+            sell_price = 0
+            reason = ""
+            
+            buy_cost = pos['cost_price'] # 单价成本
+            
+            # A. 动态止盈 (Scaling Out & Breakeven)
+            if not pos.get('has_taken_profit') and self.take_profit > 0:
+                tp_price = buy_cost * (1 + self.take_profit)
+                if data['high'] >= tp_price:
+                    # 触发止盈一半
+                    exec_price = max(data['open'], tp_price)
+                    # 卖出逻辑特殊处理：只卖一半
+                    self._execute_sell(date_str, code, data['name'], exec_price, 
+                                     is_partial=True, reason="止盈50%")
+                    # 标记已止盈，并开启保本
+                    pos['has_taken_profit'] = True
+                    pos['use_breakeven'] = True
+                    # 剩余仓位继续参与后续检查（略微简化，假设当天不连续触发）
+            
+            # B. 止损检查
+            if pos.get('use_breakeven'):
+                # 保本止损 (成本价 + 摩擦成本)
+                stop_price = buy_cost * (1.01) 
+            else:
+                # 普通止损
+                stop_price = buy_cost * (1 - self.stop_loss)
+                
+            if data['low'] <= stop_price:
+                action = "SELL"
+                reason = "止损" if not pos.get('use_breakeven') else "保本离场"
+                # 计算执行价
+                if data['open'] < stop_price:
+                    sell_price = data['open'] # 跳空低开
+                else:
+                    sell_price = stop_price
+            
+            # C. 信号卖出
+            elif data['sell_signal']:
+                action = "SELL"
+                reason = "卖出信号"
+                sell_price = data['open'] # 假设开盘卖出（实际可能是收盘确认次日卖，回测略简化）
+                # 这里为了严谨，如果是信号卖出，通常是看“当天收盘确认”，所以应该是“以当天Close卖出”或者“次日Open卖出”
+                # 原回测逻辑比较简单，这里假设信号当日Close或者Open能成交。
+                # 为了与原逻辑一致，假设是盘中或收盘操作。这里用Close可能更稳妥，或者Open。
+                # 让我们用 Close 吧，因为趋势策略通常是收盘确认。
+                sell_price = data['close'] 
+
+            if action == "SELL":
+                positions_to_close.append((code, sell_price, reason))
+            else:
+                current_positions_value += pos['shares'] * data['close']
+        
+        # 执行卖出
+        for code, price, reason in positions_to_close:
+            if code in self.positions:
+                # 再次获取名称（防止上面逻辑变化）
+                name = self.positions[code]['name']
+                self._execute_sell(date_str, code, name, price, is_partial=False, reason=reason)
+
+        # --- 2. 检查买入 ---
+        # 筛选当日所有买入信号
+        candidates = []
+        if len(self.positions) < self.max_stocks:
+            for code, data in daily_market.items():
+                if code not in self.positions and data['buy_signal']:
+                    if data['quality'] >= min_quality:
+                        candidates.append({
+                            'code': code, 
+                            'name': data['name'],
+                            'price': data['close'], # 假设以收盘价买入（信号确认）
+                            'quality': data['quality']
+                        })
+            
+            # 按质量排序
+            candidates.sort(key=lambda x: x['quality'], reverse=True)
+            
+            # 尝试买入
+            for item in candidates:
+                if len(self.positions) >= self.max_stocks:
+                    break
+                    
+                # 资金分配模型：固定份额
+                # 比如总资金10万，限5只，每只最多2万。但如果现金不够2万，就用全部现金。
+                target_pos_size = self.initial_capital / self.max_stocks
+                available_cash = min(self.cash, target_pos_size)
+                
+                # 预留手续费
+                cost_with_fee = item['price'] * (1 + self.commission)
+                max_shares = int(available_cash / cost_with_fee) // 100 * 100
+                
+                if max_shares >= 100:
+                    self._execute_buy(date_str, item['code'], item['name'], item['price'], max_shares, item['quality'])
+                    # 买入后现金减少，持仓增加（估值已变）
+
+        # --- 3. 记录当日权益 ---
+        # 重新计算最新市值
+        total_mkt_value = 0
+        for pos in self.positions.values():
+            total_mkt_value += pos['shares'] * pos['last_close']
+            
+        total_equity = self.cash + total_mkt_value
+        self.equity_curve.append({
+            'date': date_str,
+            'equity': total_equity,
+            'cash': self.cash,
+            'market_value': total_mkt_value,
+            'position_count': len(self.positions)
+        })
+
+    def _execute_buy(self, date, code, name, price, shares, quality):
+        cost = shares * price
+        fee = max(5, cost * self.commission)
+        total_out = cost + fee
+        
+        self.cash -= total_out
+        self.positions[code] = {
+            'name': name,
+            'shares': shares,
+            'cost_price': price,
+            'buy_date': date,
+            'last_close': price,
+            'quality': quality,
+            'has_taken_profit': False,
+            'use_breakeven': False
+        }
+        self.trades.append({
+            'date': date, 'code': code, 'name': name, 'action': 'BUY',
+            'price': price, 'shares': shares, 'amount': -total_out, 'reason': f"Q:{quality:.1f}"
+        })
+
+    def _execute_sell(self, date, code, name, price, is_partial, reason):
+        pos = self.positions[code]
+        
+        shares_to_sell = pos['shares']
+        if is_partial:
+            shares_to_sell = shares_to_sell // 2 // 100 * 100 # 卖一半
+            if shares_to_sell == 0: return # 股数太少无法分批，略过
+            
+        income = shares_to_sell * price
+        fee = max(5, income * self.commission) + (income * self.slippage) # 滑点算在卖出
+        net_income = income - fee
+        
+        # 收益计算
+        buy_cost = pos['cost_price'] * shares_to_sell
+        profit = net_income - buy_cost
+        profit_pct = (profit / buy_cost) * 100
+        
+        self.cash += net_income
+        self.trades.append({
+            'date': date, 'code': code, 'name': name, 'action': 'SELL',
+            'price': price, 'shares': shares_to_sell, 'amount': net_income, 
+            'profit': profit, 'profit_pct': profit_pct, 'reason': reason
+        })
+        
+        if is_partial:
+            self.positions[code]['shares'] -= shares_to_sell
+        else:
+            del self.positions[code]
+
 class BacktestEngine:
-    """回测引擎"""
-    
+    """旧的单股回测引擎 (保留)"""
+    # ... (保持原代码不变)
     def __init__(self, initial_capital=100000, commission=0.0003, 
                  slippage=0.001, position_size=1.0, stop_loss=0.10, take_profit=0.20):
         """
@@ -465,213 +763,141 @@ class StockDataLoader:
 
 
 def run_backtest(board='chinext+star', max_stocks=100, quality_thresholds=None,
-                strict_mode=True, history_days=250, stop_loss=0.10, take_profit=0.20, delay=0.1):
+                strict_mode=True, history_days=250, stop_loss=0.10, take_profit=0.20, delay=0.1,
+                initial_capital=100000):
     """
-    运行回测
-    
-    Args:
-        board: 板块筛选
-        max_stocks: 最大股票数量
-        quality_thresholds: 质量阈值列表
-        strict_mode: 是否使用严格模式
-        history_days: 历史数据天数
-        stop_loss: 止损比例（如 0.10 表示 -10%）
-        take_profit: 止盈比例（如 0.20 表示 +20%）
-        delay: 请求间隔
+    运行回测 (组合模式)
     """
     print("=" * 100)
-    print("QQE趋势策略回测系统")
+    print("QQE趋势策略回测系统 (v2.0 资金池回测版)")
     print("=" * 100)
     print(f"板块: {board}")
-    print(f"股票数量: {max_stocks}")
+    print(f"股票池: {max_stocks}只")
+    print(f"初始资金: {initial_capital}")
     print(f"模式: {'严格模式' if strict_mode else '标准模式'}")
-    print(f"历史数据: {history_days}天")
-    print(f"止损设置: {stop_loss * 100:.0f}%")
-    if take_profit > 0:
-        print(f"动态止盈: +{take_profit * 100:.0f}% (卖出一半并保本)")
-    print(f"质量阈值: {quality_thresholds}")
+    print(f"止损: {stop_loss*100:.0f}% | 止盈: {take_profit*100:.0f}%")
+    print(f"评测阈值: {quality_thresholds}")
     print("=" * 100)
     
     # 默认质量阈值
     if quality_thresholds is None:
-        quality_thresholds = [0, 50, 60, 70, 80] if strict_mode else [0]
+        quality_thresholds = [60]
     
     # 获取股票列表
-    print("\n正在获取股票列表...")
+    print("\n[1/3] 获取股票列表...")
     stock_list = StockDataLoader.get_stock_list(board_filter=board, max_stocks=max_stocks)
     print(f"共获取 {len(stock_list)} 只股票")
     
-    # 对每个质量阈值进行回测
-    results = {}
-    
-    for min_quality in quality_thresholds:
-        print(f"\n{'=' * 100}")
-        print(f"开始回测 - 质量阈值: {min_quality}分")
-        print(f"{'=' * 100}")
-        
-        engine = BacktestEngine(stop_loss=stop_loss, take_profit=take_profit)
-        all_trades = []
-        
-        for i, stock in enumerate(stock_list, 1):
-            try:
-                code = stock['code']
-                name = stock['name']
-                
-                print(f"\r进度: {i}/{len(stock_list)} - {code} {name}  ", end='', flush=True)
-                
-                # 获取数据
-                stock_data = StockDataLoader.get_stock_data(code, days=history_days)
-                
-                if stock_data is None or len(stock_data) < 60:
-                    continue
-                
-                # 回测
-                trades = engine.backtest_stock(code, name, stock_data, 
-                                              strict_mode=strict_mode, 
-                                              min_quality=min_quality)
-                
-                all_trades.extend(trades)
-                
-                time.sleep(delay)
-                
-            except Exception as e:
-                continue
-        
-        print()
-        
-        # 计算指标
-        if len(all_trades) > 0:
-            metrics = engine.calculate_metrics(all_trades)
-            results[min_quality] = {
-                'metrics': metrics,
-                'trades': all_trades
-            }
+    # 预加载数据 (只需加载一次)
+    print("\n[2/3] 预加载市场数据...")
+    market_data_cache = {}
+    valid_stocks = 0
+    for i, stock in enumerate(stock_list):
+        print(f"\r下载进度: {i+1}/{len(stock_list)}", end='', flush=True)
+        try:
+            df = StockDataLoader.get_stock_data(stock['code'], days=history_days)
+            if df is not None and len(df) >= 60:
+                # 预计算策略
+                result = qqe_trend_strategy(df, strict_mode=strict_mode)
+                market_data_cache[stock['code']] = {
+                    'name': stock['name'],
+                    'data': result
+                }
+                valid_stocks += 1
+        except Exception:
+            continue
             
-            # 显示结果
-            print(f"\n{'=' * 100}")
-            print(f"回测结果 - 质量阈值: {min_quality}分")
-            print(f"{'=' * 100}")
-            print(f"总交易次数: {metrics['total_trades']}")
-            print(f"已平仓交易: {metrics['closed_trades']}")
-            print(f"胜率: {metrics['win_rate']:.2f}%")
-            print(f"平均收益: {metrics['avg_profit']:.2f}%")
-            print(f"中位数收益: {metrics['median_profit']:.2f}%")
-            print(f"最大收益: {metrics['max_profit']:.2f}%")
-            print(f"最大亏损: {metrics['min_profit']:.2f}%")
-            print(f"平均盈利: {metrics['avg_win']:.2f}%")
-            print(f"平均亏损: {metrics['avg_loss']:.2f}%")
-            print(f"盈亏比: {metrics['profit_factor']:.2f}")
-            print(f"平均持有天数: {metrics['avg_holding']:.1f}")
-            print(f"累计收益: {metrics['cumulative_return']:.2f}%")
-            print(f"最大回撤: {metrics['max_drawdown']:.2f}%")
-            print(f"夏普比率: {metrics['sharpe_ratio']:.2f}")
-            if metrics['avg_quality'] > 0:
-                print(f"平均信号质量: {metrics['avg_quality']:.1f}分")
-            print(f"\n退出方式统计:")
-            print(f"  止损退出: {metrics['stop_loss_count']}次 ({metrics['stop_loss_rate']:.1f}%)")
-            print(f"  信号退出: {metrics['signal_exit_count']}次 ({metrics['signal_exit_count']/metrics['total_trades']*100:.1f}%)")
-            print(f"  持有中: {metrics['total_trades']-metrics['stop_loss_count']-metrics['signal_exit_count']}次")
-        else:
-            print(f"\n质量阈值 {min_quality}分 没有产生任何交易")
-    
-    # 对比分析
-    print(f"\n\n{'=' * 100}")
-    print("不同质量阈值对比分析")
-    print(f"{'=' * 100}")
-    print(f"{'质量阈值':<10}{'交易次数':<10}{'胜率%':<10}{'平均收益%':<12}{'累计收益%':<12}{'最大回撤%':<12}{'止损率%':<10}{'盈亏比':<10}{'夏普比率':<10}")
-    print("-" * 100)
-    
-    for min_quality in sorted(results.keys()):
-        m = results[min_quality]['metrics']
-        print(f"{min_quality:<10}{m['total_trades']:<10}{m['win_rate']:<10.2f}{m['avg_profit']:<12.2f}{m['cumulative_return']:<12.2f}{m['max_drawdown']:<12.2f}{m['stop_loss_rate']:<10.2f}{m['profit_factor']:<10.2f}{m['sharpe_ratio']:<10.2f}")
-    
-    print("=" * 100)
-    
-    # 保存详细结果
-    save_results(results, board, strict_mode)
-    
-    return results
+    print(f"\n有效股票数据: {valid_stocks}只")
 
-
-def save_results(results, board, strict_mode):
-    """保存回测结果到CSV文件"""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    mode = "strict" if strict_mode else "standard"
+    # 对每个质量阈值运行组合回测
+    print(f"\n[3/3] 开始多组参数回测...")
     
-    # 保存汇总指标
-    summary_data = []
-    for min_quality, result in results.items():
-        m = result['metrics']
-        summary_data.append({
-            '质量阈值': min_quality,
-            '交易次数': m['total_trades'],
-            '已平仓': m['closed_trades'],
-            '胜率%': round(m['win_rate'], 2),
-            '平均收益%': round(m['avg_profit'], 2),
-            '中位数收益%': round(m['median_profit'], 2),
-            '最大收益%': round(m['max_profit'], 2),
-            '最大亏损%': round(m['min_profit'], 2),
-            '平均盈利%': round(m['avg_win'], 2),
-            '平均亏损%': round(m['avg_loss'], 2),
-            '盈亏比': round(m['profit_factor'], 2),
-            '平均持有天数': round(m['avg_holding'], 1),
-            '累计收益%': round(m['cumulative_return'], 2),
-            '最大回撤%': round(m['max_drawdown'], 2),
-            '夏普比率': round(m['sharpe_ratio'], 2),
-            '平均质量': round(m['avg_quality'], 1) if m['avg_quality'] > 0 else 0,
-            '止损次数': m['stop_loss_count'],
-            '止损率%': round(m['stop_loss_rate'], 2),
-            '信号退出次数': m['signal_exit_count']
+    results = []
+    
+    for q in quality_thresholds:
+        print(f"\n>>> 正在回测: 最小质量分 {q} ...")
+        
+        engine = PortfolioBacktester(
+            initial_capital=initial_capital,
+            max_stocks=5,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            strict_mode=strict_mode
+        )
+        
+        # 为了避免修改 PortfolioBacktester 太多，我们这里动态注入预加载的数据
+        # 或者我们稍微修改 PortfolioBacktester 的 run 方法接收 cache
+        # 这里为了简单，我们还是让 PortfolioBacktester 自己去处理，
+        # 但既然我们已经写了 PortfolioBacktester.run 会重新下载，这会很慢。
+        # 让我重构 PortfolioBacktester.run 支持传入已处理的数据。
+        
+        # 临时方案：这里直接修改 PortfolioBacktester 的 run 方法会更好，
+        # 但为了不来回改文件，我将在这里手动组装数据传给 engine 的 _process_daily_step
+        # 或者是修改 PortfolioBacktester.run 接受 preloaded_data
+        
+        # 鉴于代码结构，最好的办法是修改 PortfolioBacktester 让它支持传入 data_cache
+        # 我会在下面紧接着修改 PortfolioBacktester
+        equity_curve, trades = engine.run_with_cache(market_data_cache, min_quality=q)
+        
+        if not equity_curve:
+            print("  无交易产生。")
+            continue
+            
+        final_equity = equity_curve[-1]['equity']
+        total_return = (final_equity - initial_capital) / initial_capital * 100
+        
+        # 计算最大回撤
+        eq_series = pd.Series([x['equity'] for x in equity_curve])
+        running_max = eq_series.expanding().max()
+        drawdowns = (eq_series - running_max) / running_max * 100
+        max_dd = drawdowns.min()
+        
+        results.append({
+            'threshold': q,
+            'return': total_return,
+            'max_dd': max_dd,
+            'final_equity': final_equity,
+            'trades': len(trades)
         })
-    
-    summary_df = pd.DataFrame(summary_data)
-    summary_file = f"backtest_summary_{board}_{mode}_{timestamp}.csv"
-    summary_df.to_csv(summary_file, index=False, encoding='utf-8-sig')
-    print(f"\n汇总结果已保存到: {summary_file}")
-    
-    # 保存所有交易详情
-    for min_quality, result in results.items():
-        trades_df = pd.DataFrame(result['trades'])
-        if len(trades_df) > 0:
-            trades_df['buy_date'] = trades_df['buy_date'].astype(str)
-            trades_df['sell_date'] = trades_df['sell_date'].astype(str)
-            
-            trades_file = f"backtest_trades_{board}_{mode}_q{min_quality}_{timestamp}.csv"
-            trades_df.to_csv(trades_file, index=False, encoding='utf-8-sig')
-            print(f"质量阈值{min_quality}的交易详情已保存到: {trades_file}")
-
+        
+        print(f"  最终权益: {final_equity:,.0f} (收益率 {total_return:.2f}%)")
+        print(f"  最大回撤: {max_dd:.2f}%")
+        
+        # 保存详情
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pd.DataFrame(equity_curve).to_csv(f"equity_q{q}_{timestamp}.csv", index=False)
+        
+    # 汇总对比
+    print("\n" + "="*60)
+    print("最终回测对比 (资金池模式)")
+    print("="*60)
+    print(f"{'阈值':<10} | {'总收益率':<15} | {'最大回撤':<15} | {'交易数':<10}")
+    print("-" * 60)
+    for res in results:
+        print(f"{res['threshold']:<10} | {res['return']:<14.2f}% | {res['max_dd']:<14.2f}% | {res['trades']:<10}")
+    print("="*60)
 
 def main():
     parser = argparse.ArgumentParser(description='QQE趋势策略回测系统')
-    parser.add_argument('--board', type=str, default='chinext+star',
-                        choices=['chinext', 'star', 'chinext+star', 'all'],
-                        help='板块筛选')
-    parser.add_argument('--max-stocks', type=int, default=100,
-                        help='最大股票数量')
-    parser.add_argument('--quality-thresholds', type=str, default='0,50,60,70,80',
-                        help='质量阈值列表，逗号分隔，如: 0,50,60,70,80')
-    parser.add_argument('--no-strict', action='store_true',
-                        help='使用标准模式（默认使用严格模式）')
-    parser.add_argument('--history-days', type=int, default=250,
-                        help='历史数据天数')
-    parser.add_argument('--stop-loss', type=float, default=0.10,
-                        help='止损比例，如 0.10 表示 -10%%，默认0.10')
-    parser.add_argument('--take-profit', type=float, default=0.20,
-                        help='动态止盈比例，如 0.20 表示 +20%%时卖出一半，默认0.20 (0表示关闭)')
-    parser.add_argument('--delay', type=float, default=0.1,
-                        help='请求间隔时间(秒)')
+    parser.add_argument('--board', type=str, default='chinext+star', help='板块筛选')
+    parser.add_argument('--max-stocks', type=int, default=100, help='最大股票数量')
+    parser.add_argument('--budget', type=float, default=100000, help='初始资金')
+    parser.add_argument('--quality-thresholds', type=str, default='50,60,70', help='质量阈值列表')
+    parser.add_argument('--no-strict', action='store_true', help='使用标准模式')
+    parser.add_argument('--history-days', type=int, default=250, help='历史数据天数')
+    parser.add_argument('--stop-loss', type=float, default=0.10, help='止损比例')
+    parser.add_argument('--take-profit', type=float, default=0.20, help='动态止盈比例')
+    parser.add_argument('--delay', type=float, default=0.1, help='请求间隔')
     
     args = parser.parse_args()
     
-    # 解析质量阈值
     quality_thresholds = [int(x.strip()) for x in args.quality_thresholds.split(',')]
-    
     strict_mode = not args.no_strict
     
-    # 运行回测
     run_backtest(
         board=args.board,
         max_stocks=args.max_stocks,
+        initial_capital=args.budget,
         quality_thresholds=quality_thresholds,
         strict_mode=strict_mode,
         history_days=args.history_days,
