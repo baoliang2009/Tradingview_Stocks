@@ -116,14 +116,46 @@ class PortfolioManager:
 
 class TradeAssistant:
     def __init__(self, budget, max_stocks, stop_loss=0.10, strict_mode=True, 
-                 telegram_token=None, telegram_chat_id=None):
+                 telegram_token=None, telegram_chat_id=None, feishu_webhook=None):
         self.portfolio = PortfolioManager(total_budget=budget, max_positions=max_stocks)
         self.stop_loss = stop_loss
         self.strict_mode = strict_mode
         self.max_stocks = max_stocks
         self.telegram_token = telegram_token
         self.telegram_chat_id = telegram_chat_id
+        self.feishu_webhook = feishu_webhook
         
+    def send_feishu_message(self, message):
+        """发送飞书消息"""
+        if not self.feishu_webhook:
+            return
+            
+        try:
+            # 飞书Webhook接口
+            headers = {'Content-Type': 'application/json'}
+            
+            # 简单处理Markdown符号，让飞书显示更干净（可选）
+            # text_content = message.replace('*', '') 
+            
+            data = {
+                "msg_type": "text",
+                "content": {
+                    "text": message
+                }
+            }
+            
+            response = requests.post(self.feishu_webhook, json=data, headers=headers, timeout=10)
+            
+            # 检查响应
+            result = response.json()
+            if result.get('code') == 0:
+                print("飞书消息发送成功")
+            else:
+                print(f"飞书消息发送失败: {result}")
+                
+        except Exception as e:
+            print(f"发送飞书消息出错: {e}")
+
     def send_telegram_message(self, message):
         """发送Telegram消息"""
         if not self.telegram_token or not self.telegram_chat_id:
@@ -200,6 +232,9 @@ class TradeAssistant:
         # 3. 发送消息
         if self.telegram_token and self.telegram_chat_id:
             self.send_telegram_message("\n".join(msg_lines))
+            
+        if self.feishu_webhook:
+            self.send_feishu_message("\n".join(msg_lines))
         
     def _check_sell_signals(self, today):
         """检查持仓股票的卖出信号"""
@@ -407,6 +442,7 @@ def main():
     parser.add_argument('--max-scan', type=int, default=100, help='扫描最大股票数量 (默认100)')
     parser.add_argument('--telegram-token', type=str, help='Telegram Bot Token')
     parser.add_argument('--telegram-chat-id', type=str, help='Telegram Chat ID')
+    parser.add_argument('--feishu-webhook', type=str, help='飞书机器人 Webhook URL')
     # 添加用于update的参数
     parser.add_argument('--cmd', type=str, nargs='+', help='更新命令 e.g. "buy sh.688001 50 200"')
     
@@ -417,7 +453,8 @@ def main():
         max_stocks=args.max_stocks,
         strict_mode=not args.no_strict,
         telegram_token=args.telegram_token,
-        telegram_chat_id=args.telegram_chat_id
+        telegram_chat_id=args.telegram_chat_id,
+        feishu_webhook=args.feishu_webhook
     )
     
     if args.action == 'scan':
