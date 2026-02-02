@@ -201,13 +201,13 @@ class PortfolioBacktester:
         candidates = []
         # DEBUG: 检查当天是否有信号但没被选中
         daily_signals = 0
+        filtered_by_quality = 0
         
         if len(self.positions) < self.max_stocks:
             for code, data in daily_market.items():
                 if data['buy_signal']:
                     daily_signals += 1
                     if code in self.positions:
-                        # print(f"DEBUG: {date_str} {code} 已有持仓，忽略")
                         pass
                     elif data['quality'] >= min_quality:
                         candidates.append({
@@ -216,11 +216,20 @@ class PortfolioBacktester:
                             'price': data['close'],
                             'quality': data['quality']
                         })
+                    else:
+                        filtered_by_quality += 1
+            
+            # DEBUG: 首次买入信号时打印诊断信息
+            if daily_signals > 0 and len(self.trades) == 0:
+                print(f"\n[调试] {date_str}: 发现 {daily_signals} 个买入信号, 通过质量筛选 {len(candidates)} 个 (最低质量={min_quality}), 被质量过滤 {filtered_by_quality} 个")
+                if len(candidates) > 0:
+                    print(f"  候选质量范围: {min([c['quality'] for c in candidates]):.1f} - {max([c['quality'] for c in candidates]):.1f}")
             
             # 按质量排序
             candidates.sort(key=lambda x: x['quality'], reverse=True)
             
             # 尝试买入
+            first_attempt = len(self.trades) == 0 and len(candidates) > 0
             for item in candidates:
                 if len(self.positions) >= self.max_stocks:
                     break
@@ -231,6 +240,11 @@ class PortfolioBacktester:
                 
                 # 预留手续费
                 cost_with_fee = item['price'] * (1 + self.commission)
+                
+                # DEBUG: 首次尝试买入时打印详细信息
+                if first_attempt:
+                    print(f"  [首次尝试] {item['code']} 价格={item['price']:.2f}, 可用资金={available_cash:.2f}, 需要最少={cost_with_fee * 100:.2f}")
+                    first_attempt = False
                 
                 # 修复：防止资金不足导致无法买入 (至少买100股)
                 if available_cash < cost_with_fee * 100:
@@ -256,33 +270,6 @@ class PortfolioBacktester:
             'market_value': total_mkt_value,
             'position_count': len(self.positions)
         })
-                    # else:
-                        # 调试：打印被过滤掉的信号
-                        # print(f"DEBUG: {date_str} {code} 信号被过滤 Q={data['quality']} < {min_quality}")
-            
-            # 按质量排序
-            candidates.sort(key=lambda x: x['quality'], reverse=True)
-            
-            # 尝试买入
-            for item in candidates:
-                if len(self.positions) >= self.max_stocks:
-                    break
-                    
-                # 资金分配模型
-                target_pos_size = self.initial_capital / self.max_stocks
-                available_cash = min(self.cash, target_pos_size)
-                
-                # 预留手续费
-                cost_with_fee = item['price'] * (1 + self.commission)
-                
-                # 修复：防止资金不足导致无法买入 (至少买100股)
-                if available_cash < cost_with_fee * 100:
-                    continue
-                    
-                max_shares = int(available_cash / cost_with_fee) // 100 * 100
-                
-                if max_shares >= 100:
-                    self._execute_buy(date_str, item['code'], item['name'], item['price'], max_shares, item['quality'])
 
     def _execute_buy(self, date, code, name, price, shares, quality):
         cost = shares * price
@@ -685,12 +672,83 @@ class StockDataLoader:
     @staticmethod
     def get_stock_list(board_filter=None, max_stocks=None):
         """获取股票列表"""
-        # ... (列表获取比较快，暂不强缓存，或者可以加简单的内存缓存)
-        # 这里保持原逻辑，主要缓存K线数据
         lg = bs.login()
-        # ... (省略中间代码) ...
+        
+        # 找到最近的交易日
+        trade_date = None
+        for days_back in range(10):
+            test_date = datetime.now() - timedelta(days=days_back)
+            date_str = test_date.strftime("%Y-%m-%d")
+            
+            rs = bs.query_all_stock(day=date_str)
+            
+            if rs.error_code == '0':
+                count = 0
+                while rs.next():
+                    count += 1
+                    if count > 0:
+                        trade_date = date_str
+                        break
+                if trade_date:
+                    break
+        
+        if not trade_date:
+            bs.logout()
+            return []
+        
+        # 重新查询股票列表
+        rs = bs.query_all_stock(day=trade_date)
+        
+        stock_list = []
+        while (rs.error_code == '0') & rs.next():
+            row = rs.get_row_data()
+            if len(row) >= 3:
+                full_code = row[0]
+                status = row[1]
+                name = row[2]
+                
+                if status == '1':
+                    # 过滤ST、退市、指数、债券
+                    if 'ST' not in name and '退' not in name and '指数' not in name and '债' not in name:
+                        # 板块筛选
+                        exchange = full_code.split('.')[0]  # sh or sz
+                        code_num = full_code.split('.')[-1]
+                        
+                        # 确保是6位股票代码
+                        if len(code_num) != 6:
+                            continue
+                        
+                        # 过滤上海交易所的指数 (sh.000xxx, sh.999xxx等)
+                        if exchange == 'sh' and (code_num.startswith('000') or code_num.startswith('999')):
+                            continue
+                        
+                        is_chinext = code_num.startswith('300') or code_num.startswith('301')
+                        is_star = code_num.startswith('688')
+                        
+                        if board_filter == 'chinext':
+                            if not is_chinext: continue
+                        elif board_filter == 'star':
+                            if not is_star: continue
+                        elif board_filter == 'chinext+star':
+                            if not (is_chinext or is_star): continue
+                        elif board_filter == 'all':
+                            # 只接受主板股票 (60, 00, 30, 68开头)
+                            if not (code_num.startswith('60') or code_num.startswith('00') or 
+                                   code_num.startswith('30') or code_num.startswith('68')):
+                                continue
+                        else:
+                            # 支持自定义前缀，如 "300,00"
+                            prefixes = board_filter.split(',')
+                            if not any(code_num.startswith(p.strip()) for p in prefixes):
+                                continue
+                        
+                        stock_list.append({'code': full_code, 'name': name})
+        
         bs.logout()
-        # ...
+        
+        if max_stocks and max_stocks < len(stock_list):
+            stock_list = stock_list[:max_stocks]
+        
         return stock_list
     
     @staticmethod
