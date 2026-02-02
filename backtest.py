@@ -305,13 +305,17 @@ class BacktestEngine:
         else:
             avg_quality = 0
         
-        # 累计收益
-        cumulative_return = ((1 + df['profit_pct'] / 100).prod() - 1) * 100
+        # 累计收益 (改为单利累加，避免夸张的复利误导)
+        # 假设每次使用固定金额交易，不进行复利定投
+        cumulative_return = df['profit_pct'].sum()
         
-        # 最大回撤
-        cumulative_returns = (1 + df['profit_pct'] / 100).cumprod()
-        running_max = cumulative_returns.expanding().max()
-        drawdown = (cumulative_returns - running_max) / running_max * 100
+        # 最大回撤 (基于资金曲线计算)
+        # 假设初始资金为100，每次盈亏叠加
+        equity = 100 + df['profit_pct'].cumsum()
+        running_max = equity.expanding().max()
+        # 防止分母为0或负数（虽然理论上equity应该>0）
+        # 这里计算的是相对于最高点的回撤百分比
+        drawdown = (equity - running_max) / running_max * 100
         max_drawdown = drawdown.min()
         
         # 夏普比率（简化版，假设无风险利率为0）
