@@ -84,11 +84,20 @@ class BacktestEngine:
                     current_return = (current_price - buy_cost) / buy_cost
                     
                     # 检查止损
-                    if current_return <= -self.stop_loss:
+                    stop_price_threshold = buy_cost * (1 - self.stop_loss)
+                    
+                    if row['low'] <= stop_price_threshold:
                         sell_date = date
-                        sell_price = current_price
                         exit_reason = 'stop_loss'
                         status = 'closed'
+                        
+                        # 确定止损执行价格
+                        if row['open'] < stop_price_threshold:
+                            # 如果开盘就跌破止损价（跳空低开），则以开盘价卖出
+                            sell_price = row['open']
+                        else:
+                            # 否则以止损价卖出（盘中触及止损线）
+                            sell_price = stop_price_threshold
                         
                         # 平仓
                         sell_net = sell_price * (1 - self.slippage - self.commission)
