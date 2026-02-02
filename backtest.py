@@ -249,12 +249,12 @@ class BacktestEngine:
                     'status': status
                 }
                 
-                stock_trades.append(trade)
-                current_position = None  # 清空持仓
-                continue
-            
-            # 检查卖出信号
-            if date in sell_signals.index:
+                        stock_trades.append(trade)
+                        current_position = None  # 清空持仓
+                        continue
+                    
+                    # --- 3. 检查卖出信号 ---
+                    if date in sell_signals.index:
                         sell_date = date
                         sell_price = row['open']
                         exit_reason = 'signal'
@@ -280,6 +280,25 @@ class BacktestEngine:
                             'exit_reason': exit_reason,
                             'status': status
                         }
+                        
+                        stock_trades.append(trade)
+                        current_position = None  # 清空持仓
+                        continue
+                
+                # 如果当前没有持仓，检查是否有买入信号
+                if current_position is None and date in buy_signals.index:
+                    buy_price = buy_signals.loc[date]['open']
+                    signal_quality = buy_signals.loc[date].get('signal_quality', 0) if strict_mode else 0
+                    buy_cost = buy_price * (1 + self.slippage + self.commission)
+                    
+                    # 建立持仓
+                    current_position = {
+                        'buy_date': date,
+                        'buy_price': buy_price,
+                        'buy_cost': buy_cost,
+                        'signal_quality': signal_quality,
+                        'has_taken_profit': False  # 标记是否已经止盈过
+                    }
                         
                         stock_trades.append(trade)
                         current_position = None  # 清空持仓
