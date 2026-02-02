@@ -941,8 +941,13 @@ def main():
     
     args = parser.parse_args()
     
-    quality_thresholds = [int(x.strip()) for x in args.quality_thresholds.split(',')]
     strict_mode = not args.no_strict
+    
+    # 智能默认：非严格模式下默认阈值为0，严格模式下保持原默认值
+    if args.quality_thresholds == '50,60,70' and not strict_mode:
+        quality_thresholds = [0]
+    else:
+        quality_thresholds = [int(x.strip()) for x in args.quality_thresholds.split(',')]
     
     run_backtest(
         board=args.board,
