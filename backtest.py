@@ -216,10 +216,6 @@ class PortfolioBacktester:
                             'price': data['close'],
                             'quality': data['quality']
                         })
-                    else:
-                        # 只有当确实有信号但因质量被拒时才打印，防止刷屏，可以注释掉
-                        # print(f"DEBUG: {date_str} {code} 质量不足 Q={data['quality']:.1f} < {min_quality}")
-                        pass
             
             # 按质量排序
             candidates.sort(key=lambda x: x['quality'], reverse=True)
@@ -229,15 +225,19 @@ class PortfolioBacktester:
                 if len(self.positions) >= self.max_stocks:
                     break
                     
+                # 资金分配模型
                 target_pos_size = self.initial_capital / self.max_stocks
                 available_cash = min(self.cash, target_pos_size)
+                
+                # 预留手续费
                 cost_with_fee = item['price'] * (1 + self.commission)
                 
+                # 修复：防止资金不足导致无法买入 (至少买100股)
                 if available_cash < cost_with_fee * 100:
-                    # print(f"DEBUG: {date_str} {item['code']} 资金不足 需{cost_with_fee*100:.0f} 剩{available_cash:.0f}")
                     continue
                     
                 max_shares = int(available_cash / cost_with_fee) // 100 * 100
+                
                 if max_shares >= 100:
                     self._execute_buy(date_str, item['code'], item['name'], item['price'], max_shares, item['quality'])
                 else:
