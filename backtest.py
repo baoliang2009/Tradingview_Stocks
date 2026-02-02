@@ -90,17 +90,14 @@ class PortfolioBacktester:
     def run_with_cache(self, market_data_cache, min_quality=60):
         """
         使用预缓存的数据执行组合回测
-        
-        Args:
-            market_data_cache: {code: {name, data: DataFrame}}
-            min_quality: 质量阈值
         """
         # 1. 转换数据格式
-        # 目标格式: date -> {code: {open, high, low, close, buy_signal, sell_signal, quality}}
         market_data = {} 
         all_dates = set()
         
         signal_col = 'buy_signal_strict' if self.strict_mode else 'buy_signal'
+        
+        total_buy_signals = 0 # 调试统计
         
         for code, item in market_data_cache.items():
             name = item['name']
@@ -113,16 +110,29 @@ class PortfolioBacktester:
                 if d_str not in market_data:
                     market_data[d_str] = {}
                 
+                # 检查是否包含必需列
+                has_signal = False
+                if signal_col in row:
+                    has_signal = bool(row[signal_col])
+                
+                if has_signal:
+                    total_buy_signals += 1
+                
                 market_data[d_str][code] = {
                     'name': name,
                     'open': row['open'],
                     'high': row['high'],
                     'low': row['low'],
                     'close': row['close'],
-                    'buy_signal': row[signal_col],
-                    'sell_signal': row['sell_signal'],
+                    'buy_signal': has_signal,
+                    'sell_signal': bool(row['sell_signal']) if 'sell_signal' in row else False,
                     'quality': row.get('signal_quality', 0) if self.strict_mode else 0
                 }
+        
+        print(f"DEBUG: 数据转换完成，共发现 {total_buy_signals} 个原始买入信号 (严格模式: {self.strict_mode}, 信号列: {signal_col})")
+        
+        if total_buy_signals == 0:
+            print("警告: 没有任何股票产生买入信号，请检查策略逻辑或严格模式设置！")
         
         # 2. 按日时间步进
         sorted_dates = sorted(list(all_dates))
@@ -135,23 +145,117 @@ class PortfolioBacktester:
 
     def _process_daily_step(self, date_str, daily_market, min_quality):
         """处理每一天的交易逻辑"""
-        # ... (省略卖出逻辑) ...
+        # ... (卖出逻辑不变，省略以节省空间) ...
+        # --- 1. 更新持仓市值 & 检查卖出 ---
+        positions_to_close = [] 
+        current_positions_value = 0
         
+        for code, pos in self.positions.items():
+            if code not in daily_market:
+                current_positions_value += pos['shares'] * pos['last_close']
+                continue
+            data = daily_market[code]
+            pos['last_close'] = data['close']
+            
+            action = None
+            sell_price = 0
+            reason = ""
+            buy_cost = pos['cost_price']
+            
+            if not pos.get('has_taken_profit') and self.take_profit > 0:
+                tp_price = buy_cost * (1 + self.take_profit)
+                if data['high'] >= tp_price:
+                    exec_price = max(data['open'], tp_price)
+                    self._execute_sell(date_str, code, data['name'], exec_price, is_partial=True, reason="止盈50%")
+                    pos['has_taken_profit'] = True
+                    pos['use_breakeven'] = True
+            
+            if pos.get('use_breakeven'):
+                stop_price = buy_cost * (1.01) 
+            else:
+                stop_price = buy_cost * (1 - self.stop_loss)
+                
+            if data['low'] <= stop_price:
+                action = "SELL"
+                reason = "止损" if not pos.get('use_breakeven') else "保本离场"
+                if data['open'] < stop_price:
+                    sell_price = data['open']
+                else:
+                    sell_price = stop_price
+            elif data['sell_signal']:
+                action = "SELL"
+                reason = "卖出信号"
+                sell_price = data['close'] 
+
+            if action == "SELL":
+                positions_to_close.append((code, sell_price, reason))
+            else:
+                current_positions_value += pos['shares'] * data['close']
+        
+        for code, price, reason in positions_to_close:
+            if code in self.positions:
+                name = self.positions[code]['name']
+                self._execute_sell(date_str, code, name, price, is_partial=False, reason=reason)
+
         # --- 2. 检查买入 ---
-        # 筛选当日所有买入信号
         candidates = []
+        # DEBUG: 检查当天是否有信号但没被选中
+        daily_signals = 0
+        
         if len(self.positions) < self.max_stocks:
             for code, data in daily_market.items():
-                if code not in self.positions and data['buy_signal']:
-                    # 如果是非严格模式，min_quality 通常设为 0，所以这里直接通过
-                    # 如果是严格模式，才卡分
-                    if data['quality'] >= min_quality:
+                if data['buy_signal']:
+                    daily_signals += 1
+                    if code in self.positions:
+                        # print(f"DEBUG: {date_str} {code} 已有持仓，忽略")
+                        pass
+                    elif data['quality'] >= min_quality:
                         candidates.append({
                             'code': code, 
                             'name': data['name'],
                             'price': data['close'],
                             'quality': data['quality']
                         })
+                    else:
+                        # 只有当确实有信号但因质量被拒时才打印，防止刷屏，可以注释掉
+                        # print(f"DEBUG: {date_str} {code} 质量不足 Q={data['quality']:.1f} < {min_quality}")
+                        pass
+            
+            # 按质量排序
+            candidates.sort(key=lambda x: x['quality'], reverse=True)
+            
+            # 尝试买入
+            for item in candidates:
+                if len(self.positions) >= self.max_stocks:
+                    break
+                    
+                target_pos_size = self.initial_capital / self.max_stocks
+                available_cash = min(self.cash, target_pos_size)
+                cost_with_fee = item['price'] * (1 + self.commission)
+                
+                if available_cash < cost_with_fee * 100:
+                    # print(f"DEBUG: {date_str} {item['code']} 资金不足 需{cost_with_fee*100:.0f} 剩{available_cash:.0f}")
+                    continue
+                    
+                max_shares = int(available_cash / cost_with_fee) // 100 * 100
+                if max_shares >= 100:
+                    self._execute_buy(date_str, item['code'], item['name'], item['price'], max_shares, item['quality'])
+                else:
+                    pass
+        
+        # --- 3. 记录当日权益 ---
+        total_mkt_value = 0
+        for pos in self.positions.values():
+            total_mkt_value += pos['shares'] * pos['last_close']
+            
+        total_equity = self.cash + total_mkt_value
+        self.equity_curve.append({
+            'date': date_str,
+            'equity': total_equity,
+            'cash': self.cash,
+            'market_value': total_mkt_value,
+            'position_count': len(self.positions)
+        })
                     # else:
                         # 调试：打印被过滤掉的信号
                         # print(f"DEBUG: {date_str} {code} 信号被过滤 Q={data['quality']} < {min_quality}")
