@@ -4,6 +4,7 @@ import baostock as bs
 import os
 import json
 import argparse
+import requests
 from datetime import datetime, timedelta
 from qqe_trend_strategy import qqe_trend_strategy
 from backtest import StockDataLoader
@@ -114,12 +115,35 @@ class PortfolioManager:
         return net_income, record
 
 class TradeAssistant:
-    def __init__(self, budget, max_stocks, stop_loss=0.10, strict_mode=True):
+    def __init__(self, budget, max_stocks, stop_loss=0.10, strict_mode=True, 
+                 telegram_token=None, telegram_chat_id=None):
         self.portfolio = PortfolioManager(total_budget=budget, max_positions=max_stocks)
         self.stop_loss = stop_loss
         self.strict_mode = strict_mode
         self.max_stocks = max_stocks
+        self.telegram_token = telegram_token
+        self.telegram_chat_id = telegram_chat_id
         
+    def send_telegram_message(self, message):
+        """发送Telegram消息"""
+        if not self.telegram_token or not self.telegram_chat_id:
+            return
+            
+        try:
+            url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
+            data = {
+                "chat_id": self.telegram_chat_id,
+                "text": message,
+                "parse_mode": "Markdown"
+            }
+            response = requests.post(url, data=data, timeout=10)
+            if response.status_code == 200:
+                print("Telegram消息发送成功")
+            else:
+                print(f"Telegram消息发送失败: {response.text}")
+        except Exception as e:
+            print(f"发送Telegram消息出错: {e}")
+
     def analyze_market(self, board='chinext+star', max_scan=100):
         """全市场扫描分析"""
         print(f"\n{'='*60}")
@@ -130,19 +154,52 @@ class TradeAssistant:
         
         today = datetime.now().strftime('%Y-%m-%d')
         
+        # 收集消息内容
+        msg_lines = [f"*📅 实盘日报 {today}*"]
+        msg_lines.append(f"资金: {self.portfolio.cash:.0f} / {self.portfolio.total_budget:.0f}")
+        msg_lines.append(f"仓位: {len(self.portfolio.positions)}/{self.max_stocks}\n")
+        
         # 1. 检查当前持仓 (卖出信号/止损)
-        self._check_sell_signals(today)
+        sell_actions = self._check_sell_signals(today)
+        
+        if sell_actions:
+            msg_lines.append("*⚠️ 卖出建议:*")
+            for code, price, reason in sell_actions:
+                name = self.portfolio.positions.get(code, {}).get('name', code)
+                msg_lines.append(f"🔴 {name} ({code})")
+                msg_lines.append(f"   价格: {price:.2f}")
+                msg_lines.append(f"   原因: {reason}")
+            msg_lines.append("")
         
         # 2. 如果还有仓位空缺，扫描买入机会
         if len(self.portfolio.positions) < self.max_stocks:
-            self._scan_buy_opportunities(board, today, max_scan)
+            buy_candidates = self._scan_buy_opportunities(board, today, max_scan)
+            
+            if buy_candidates:
+                msg_lines.append("*✅ 买入机会:*")
+                # 计算可用槽位
+                open_slots = self.max_stocks - len(self.portfolio.positions)
+                
+                for idx, item in enumerate(buy_candidates[:open_slots]):
+                    target_per_stock = self.portfolio.total_budget / self.max_stocks
+                    can_buy_shares = int((min(self.portfolio.cash, target_per_stock) * 0.99) / item['price']) // 100 * 100
+                    cost = can_buy_shares * item['price']
+                    
+                    msg_lines.append(f"🟢 {item['name']} ({item['code']})")
+                    msg_lines.append(f"   评分: {item['quality']:.1f}")
+                    msg_lines.append(f"   现价: {item['price']:.2f}")
+                    if can_buy_shares >= 100:
+                        msg_lines.append(f"   建议: Buy {can_buy_shares}股 (约{cost:.0f}元)")
+                    else:
+                        msg_lines.append(f"   建议: 资金不足1手")
+                    msg_lines.append("")
         else:
             print("\n仓位已满，暂不扫描买入机会。")
+            msg_lines.append("仓位已满，暂无买入建议。")
             
-        # 3. 保存状态
-        # 注意：这里我们只是“建议”，用户确认执行后再调用 save_portfolio 是更安全的方式
-        # 但为了简化，本工具假设用户会跟随操作，或者用户可以在操作后手动修改json
-        # 更好的方式是提供 --execute 参数来确认写入
+        # 3. 发送消息
+        if self.telegram_token and self.telegram_chat_id:
+            self.send_telegram_message("\n".join(msg_lines))
         
     def _check_sell_signals(self, today):
         """检查持仓股票的卖出信号"""
@@ -150,7 +207,7 @@ class TradeAssistant:
         
         if not self.portfolio.positions:
             print("  当前无持仓。")
-            return
+            return []
 
         actions = []
         
@@ -264,7 +321,7 @@ class TradeAssistant:
         
         if not candidates:
             print("今日无符合条件的买入目标。")
-            return
+            return []
             
         # 按质量排序
         candidates.sort(key=lambda x: x['quality'], reverse=True)
@@ -291,6 +348,8 @@ class TradeAssistant:
             elif is_target:
                 print(f"    资金不足以买入1手 ({target_per_stock:.0f}元)")
             print("-" * 30)
+            
+        return candidates
 
     def execute_commands(self, commands):
         """
@@ -346,6 +405,8 @@ def main():
     parser.add_argument('--action', type=str, choices=['scan', 'update'], default='scan', 
                        help='操作: scan=扫描信号, update=手动更新持仓')
     parser.add_argument('--max-scan', type=int, default=100, help='扫描最大股票数量 (默认100)')
+    parser.add_argument('--telegram-token', type=str, help='Telegram Bot Token')
+    parser.add_argument('--telegram-chat-id', type=str, help='Telegram Chat ID')
     # 添加用于update的参数
     parser.add_argument('--cmd', type=str, nargs='+', help='更新命令 e.g. "buy sh.688001 50 200"')
     
@@ -354,7 +415,9 @@ def main():
     assistant = TradeAssistant(
         budget=args.budget,
         max_stocks=args.max_stocks,
-        strict_mode=not args.no_strict
+        strict_mode=not args.no_strict,
+        telegram_token=args.telegram_token,
+        telegram_chat_id=args.telegram_chat_id
     )
     
     if args.action == 'scan':
