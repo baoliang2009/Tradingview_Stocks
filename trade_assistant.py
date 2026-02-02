@@ -487,43 +487,78 @@ class TradeAssistant:
         
         self.portfolio.save_portfolio()
 
+def load_config(config_file):
+    """加载配置文件"""
+    if os.path.exists(config_file):
+        try:
+            with open(config_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"读取配置文件失败: {e}")
+    return {}
+
 def main():
     parser = argparse.ArgumentParser(description='QQE策略实盘助手')
-    parser.add_argument('--budget', type=float, default=100000, help='总预算')
-    parser.add_argument('--max-stocks', type=int, default=5, help='最大持仓数量')
+    parser.add_argument('--config', type=str, default='config.json', help='配置文件路径 (默认config.json)')
+    parser.add_argument('--budget', type=float, help='总预算')
+    parser.add_argument('--max-stocks', type=int, help='最大持仓数量')
     parser.add_argument('--no-strict', action='store_true', help='关闭严格模式')
-    parser.add_argument('--board', type=str, default='chinext+star', help='扫描板块')
+    parser.add_argument('--board', type=str, help='扫描板块')
     parser.add_argument('--action', type=str, choices=['scan', 'update'], default='scan', 
                        help='操作: scan=扫描信号, update=手动更新持仓')
-    parser.add_argument('--max-scan', type=int, default=100, help='扫描最大股票数量 (默认100)')
+    parser.add_argument('--max-scan', type=int, help='扫描最大股票数量')
+    
     parser.add_argument('--telegram-token', type=str, help='Telegram Bot Token')
-    parser.add_argument('--telegram-chat-id', type=str, help='Telegram Chat ID')
+    parser.add_argument('--telegram-chat_id', type=str, help='Telegram Chat ID')
     parser.add_argument('--feishu-webhook', type=str, help='飞书机器人 Webhook URL')
     parser.add_argument('--feishu-app-id', type=str, help='飞书应用 App ID')
     parser.add_argument('--feishu-app-secret', type=str, help='飞书应用 App Secret')
     parser.add_argument('--feishu-target-id', type=str, help='飞书消息接收者ID (邮箱/OpenID/ChatID)')
-    parser.add_argument('--feishu-target-type', type=str, default='email', choices=['email', 'open_id', 'chat_id', 'user_id'], help='接收者ID类型 (默认email)')
+    parser.add_argument('--feishu-target-type', type=str, choices=['email', 'open_id', 'chat_id', 'user_id'], help='接收者ID类型')
     
     # 添加用于update的参数
     parser.add_argument('--cmd', type=str, nargs='+', help='更新命令 e.g. "buy sh.688001 50 200"')
     
     args = parser.parse_args()
     
+    # 1. 加载配置
+    config = load_config(args.config)
+    feishu_cfg = config.get('feishu', {})
+    trade_cfg = config.get('trade', {})
+    
+    # 2. 合并参数 (命令行 > 配置文件 > 默认值)
+    budget = args.budget if args.budget is not None else trade_cfg.get('budget', 100000)
+    max_stocks = args.max_stocks if args.max_stocks is not None else trade_cfg.get('max_stocks', 5)
+    board = args.board if args.board is not None else trade_cfg.get('board', 'chinext+star')
+    max_scan = args.max_scan if args.max_scan is not None else trade_cfg.get('max_scan', 100)
+    
+    # strict_mode 处理比较特殊，因为是 flag
+    # 如果命令行没传 --no-strict，则看配置文件；如果配置文件也没写，默认 True
+    if args.no_strict:
+        strict_mode = False
+    else:
+        strict_mode = trade_cfg.get('strict_mode', True)
+        
+    feishu_app_id = args.feishu_app_id or feishu_cfg.get('app_id')
+    feishu_app_secret = args.feishu_app_secret or feishu_cfg.get('app_secret')
+    feishu_target_id = args.feishu_target_id or feishu_cfg.get('target_id')
+    feishu_target_type = args.feishu_target_type or feishu_cfg.get('target_type', 'email')
+    
     assistant = TradeAssistant(
-        budget=args.budget,
-        max_stocks=args.max_stocks,
-        strict_mode=not args.no_strict,
-        telegram_token=args.telegram_token,
+        budget=budget,
+        max_stocks=max_stocks,
+        strict_mode=strict_mode,
+        telegram_token=args.telegram_token, # 这里还没加配置文件的telegram部分，暂时保留
         telegram_chat_id=args.telegram_chat_id,
         feishu_webhook=args.feishu_webhook,
-        feishu_app_id=args.feishu_app_id,
-        feishu_app_secret=args.feishu_app_secret,
-        feishu_target_id=args.feishu_target_id,
-        feishu_target_type=args.feishu_target_type
+        feishu_app_id=feishu_app_id,
+        feishu_app_secret=feishu_app_secret,
+        feishu_target_id=feishu_target_id,
+        feishu_target_type=feishu_target_type
     )
     
     if args.action == 'scan':
-        assistant.analyze_market(board=args.board, max_scan=args.max_scan)
+        assistant.analyze_market(board=board, max_scan=max_scan)
         print("\n提示: 如果您根据建议进行了交易，请使用 --action update 更新持仓状态。")
         print("例如: python3 trade_assistant.py --action update --cmd \"buy sh.688052 185.6 200\"")
         
