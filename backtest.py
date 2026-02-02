@@ -538,7 +538,7 @@ def main():
     parser.add_argument('--history-days', type=int, default=250,
                         help='历史数据天数')
     parser.add_argument('--stop-loss', type=float, default=0.10,
-                        help='止损比例，如 0.10 表示 -10% (默认0.10)')
+                        help='止损比例，如 0.10 表示 -10%%，默认0.10')
     parser.add_argument('--delay', type=float, default=0.1,
                         help='请求间隔时间(秒)')
     
