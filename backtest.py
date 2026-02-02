@@ -397,12 +397,19 @@ class StockDataLoader:
                         is_chinext = code_num.startswith('300') or code_num.startswith('301')
                         is_star = code_num.startswith('688')
                         
-                        if board_filter == 'chinext' and not is_chinext:
-                            continue
-                        elif board_filter == 'star' and not is_star:
-                            continue
-                        elif board_filter == 'chinext+star' and not (is_chinext or is_star):
-                            continue
+                        if board_filter == 'chinext':
+                            if not is_chinext: continue
+                        elif board_filter == 'star':
+                            if not is_star: continue
+                        elif board_filter == 'chinext+star':
+                            if not (is_chinext or is_star): continue
+                        elif board_filter == 'all':
+                            pass
+                        else:
+                            # 支持自定义前缀，如 "300,00"
+                            prefixes = board_filter.split(',')
+                            if not any(code_num.startswith(p.strip()) for p in prefixes):
+                                continue
                         
                         stock_list.append({'code': full_code, 'name': name})
         
