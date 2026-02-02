@@ -73,23 +73,22 @@ class BacktestEngine:
             
             # 合并所有日期，按时间顺序处理
             for date in result.index:
+                # 获取当前行数据
+                row = result.loc[date]
+                
                 # 如果当前有持仓，检查是否需要平仓
                 if current_position is not None:
                     buy_date = current_position['buy_date']
                     buy_cost = current_position['buy_cost']
                     has_taken_profit = current_position.get('has_taken_profit', False)
                     
-                    # 获取当前行数据
-                    row = result.loc[date]
-                    
-                    # --- 1. 检查动态止盈 (新增逻辑) ---
-                    # 只有未止盈过，且设置了止盈比例才检查
+                    # --- 1. 检查动态止盈 ---
                     if not has_taken_profit and self.take_profit > 0:
                         tp_price_threshold = buy_cost * (1 + self.take_profit)
                         
                         # 检查最高价是否触及止盈线
                         if row['high'] >= tp_price_threshold:
-                            # 确定成交价：如果是跳空高开，按开盘价；否则按止盈线
+                            # 确定成交价
                             tp_price = max(row['open'], tp_price_threshold)
                             
                             # 生成一笔"卖出50%"的交易记录
@@ -116,22 +115,14 @@ class BacktestEngine:
                             
                             # 更新持仓状态
                             current_position['has_taken_profit'] = True
-                            # 关键：止盈后，剩余仓位的止损线上移到"保本" (成本价)
-                            # 我们通过标记 use_breakeven_stop 来实现
                             current_position['use_breakeven_stop'] = True
                             
-                            # 注意：这里continue，因为当天可能既止盈又触发其他信号(虽然概率小)，
-                            # 但为了简化，我们认为止盈是当天主要动作。
-                            # 实际更严谨的做法是：剩余仓位继续接受当天的止损/信号检查。
-                            # 这里简化处理，假设止盈后当天剩余仓位安全。
+                            # 继续检查是否触发其他信号（简化处理，这里不再继续）
                             continue
                             
                     # --- 2. 检查止损 ---
-                    # 动态计算止损价
                     if current_position.get('use_breakeven_stop', False):
-                        # 如果已经止盈过一半，剩余仓位实行保本止损 (止损价 = 成本价)
-                        # 为了防止微小波动被震出，可以设置成本价上方一点点或刚好成本价
-                        # 这里设置为：成本价 * (1 + 手续费率)，确保真正不亏钱
+                        # 保本止损
                         stop_price_threshold = buy_cost * (1 + self.commission + self.slippage)
                     else:
                         # 普通止损
@@ -217,105 +208,7 @@ class BacktestEngine:
                         'buy_price': buy_price,
                         'buy_cost': buy_cost,
                         'signal_quality': signal_quality,
-                        'has_taken_profit': False  # 标记是否已经止盈过
-                    }
-            
-            # 如果最后还有持仓，以最后一天的收盘价平仓
-            if current_position is not None:
-                buy_date = current_position['buy_date']
-                buy_cost = current_position['buy_cost']
-                sell_date = result.index[-1]
-                sell_price = result.iloc[-1]['close']
-                exit_reason = 'open'
-                status = 'open'
-                
-                sell_net = sell_price * (1 - self.slippage - self.commission)
-                profit_pct = (sell_net - buy_cost) / buy_cost * 100
-                holding_days = (sell_date - buy_date).days
-                
-                trade = {
-                    'stock_code': stock_code,
-                    'stock_name': stock_name,
-                    'buy_date': buy_date,
-                    'buy_price': current_position['buy_price'],
-                    'buy_cost': buy_cost,
-                    'sell_date': sell_date,
-                    'sell_price': sell_price,
-                    'sell_net': sell_net,
-                    'profit_pct': profit_pct,
-                    'holding_days': holding_days,
-                    'signal_quality': current_position['signal_quality'],
-                    'exit_reason': exit_reason,
-                    'status': status
-                }
-                
-                        stock_trades.append(trade)
-                        current_position = None  # 清空持仓
-                        continue
-                    
-                    # --- 3. 检查卖出信号 ---
-                    if date in sell_signals.index:
-                        sell_date = date
-                        sell_price = row['open']
-                        exit_reason = 'signal'
-                        status = 'closed'
-                        
-                        # 平仓
-                        sell_net = sell_price * (1 - self.slippage - self.commission)
-                        profit_pct = (sell_net - buy_cost) / buy_cost * 100
-                        holding_days = (sell_date - buy_date).days
-                        
-                        trade = {
-                            'stock_code': stock_code,
-                            'stock_name': stock_name,
-                            'buy_date': buy_date,
-                            'buy_price': current_position['buy_price'],
-                            'buy_cost': buy_cost,
-                            'sell_date': sell_date,
-                            'sell_price': sell_price,
-                            'sell_net': sell_net,
-                            'profit_pct': profit_pct,
-                            'holding_days': holding_days,
-                            'signal_quality': current_position['signal_quality'],
-                            'exit_reason': exit_reason,
-                            'status': status
-                        }
-                        
-                        stock_trades.append(trade)
-                        current_position = None  # 清空持仓
-                        continue
-                
-                # 如果当前没有持仓，检查是否有买入信号
-                if current_position is None and date in buy_signals.index:
-                    buy_price = buy_signals.loc[date]['open']
-                    signal_quality = buy_signals.loc[date].get('signal_quality', 0) if strict_mode else 0
-                    buy_cost = buy_price * (1 + self.slippage + self.commission)
-                    
-                    # 建立持仓
-                    current_position = {
-                        'buy_date': date,
-                        'buy_price': buy_price,
-                        'buy_cost': buy_cost,
-                        'signal_quality': signal_quality,
-                        'has_taken_profit': False  # 标记是否已经止盈过
-                    }
-                        
-                        stock_trades.append(trade)
-                        current_position = None  # 清空持仓
-                        continue
-                
-                # 如果当前没有持仓，检查是否有买入信号
-                if current_position is None and date in buy_signals.index:
-                    buy_price = buy_signals.loc[date]['open']
-                    signal_quality = buy_signals.loc[date].get('signal_quality', 0) if strict_mode else 0
-                    buy_cost = buy_price * (1 + self.slippage + self.commission)
-                    
-                    # 建立持仓
-                    current_position = {
-                        'buy_date': date,
-                        'buy_price': buy_price,
-                        'buy_cost': buy_cost,
-                        'signal_quality': signal_quality
+                        'has_taken_profit': False
                     }
             
             # 如果最后还有持仓，以最后一天的收盘价平仓
