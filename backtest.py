@@ -812,17 +812,22 @@ class StockDataLoader:
         return df
 
 
-def run_backtest(board='chinext+star', max_stocks=100, quality_thresholds=None,
+def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_thresholds=None,
                 strict_mode=True, history_days=250, stop_loss=0.10, take_profit=0.20, delay=0.1,
                 initial_capital=100000):
     """
     运行回测 (组合模式)
+    
+    参数说明:
+    - max_stocks: 股票池大小（从市场选取多少只股票）
+    - max_positions: 最大持仓数量（同时持有多少只股票）
     """
     print("=" * 100)
     print("QQE趋势策略回测系统 (v2.0 资金池回测版)")
     print("=" * 100)
     print(f"板块: {board}")
     print(f"股票池: {max_stocks}只")
+    print(f"最大持仓: {max_positions}只")
     print(f"初始资金: {initial_capital}")
     print(f"模式: {'严格模式' if strict_mode else '标准模式'}")
     print(f"止损: {stop_loss*100:.0f}% | 止盈: {take_profit*100:.0f}%")
@@ -869,7 +874,7 @@ def run_backtest(board='chinext+star', max_stocks=100, quality_thresholds=None,
         
         engine = PortfolioBacktester(
             initial_capital=initial_capital,
-            max_stocks=5,
+            max_stocks=max_positions,
             stop_loss=stop_loss,
             take_profit=take_profit,
             strict_mode=strict_mode
@@ -930,7 +935,8 @@ def run_backtest(board='chinext+star', max_stocks=100, quality_thresholds=None,
 def main():
     parser = argparse.ArgumentParser(description='QQE趋势策略回测系统')
     parser.add_argument('--board', type=str, default='chinext+star', help='板块筛选')
-    parser.add_argument('--max-stocks', type=int, default=100, help='最大股票数量')
+    parser.add_argument('--max-stocks', type=int, default=100, help='股票池大小（选取多少只股票）')
+    parser.add_argument('--max-positions', type=int, default=5, help='最大持仓数量（同时持有多少只）')
     parser.add_argument('--budget', type=float, default=100000, help='初始资金')
     parser.add_argument('--quality-thresholds', type=str, default='50,60,70', help='质量阈值列表')
     parser.add_argument('--no-strict', action='store_true', help='使用标准模式')
@@ -952,6 +958,7 @@ def main():
     run_backtest(
         board=args.board,
         max_stocks=args.max_stocks,
+        max_positions=args.max_positions,
         initial_capital=args.budget,
         quality_thresholds=quality_thresholds,
         strict_mode=strict_mode,
