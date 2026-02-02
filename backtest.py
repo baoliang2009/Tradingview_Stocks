@@ -250,11 +250,11 @@ class BacktestEngine:
                 }
                 
                 stock_trades.append(trade)
-                        current_position = None  # 清空持仓
-                        continue
-                    
-                    # 检查卖出信号
-                    if date in sell_signals.index:
+                current_position = None  # 清空持仓
+                continue
+            
+            # 检查卖出信号
+            if date in sell_signals.index:
                         sell_date = date
                         sell_price = row['open']
                         exit_reason = 'signal'
