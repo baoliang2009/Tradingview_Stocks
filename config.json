@@ -1,0 +1,15 @@
+{
+    "feishu": {
+        "app_id": "cli_a75ebf0e959bd013",
+        "app_secret": "6gwFiduJf4lfZzFQqp1c5EDpO1ADHzIQ",
+        "target_id": "oc_45ca697214c4bad496d5406ac7d87007",
+        "target_type": "chat_id"
+    },
+    "trade": {
+        "budget": 100000,
+        "max_stocks": 5,
+        "board": "chinext+star",
+        "strict_mode": true,
+        "max_scan": 100
+    }
+}
