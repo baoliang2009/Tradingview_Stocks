@@ -116,7 +116,8 @@ class PortfolioManager:
 
 class TradeAssistant:
     def __init__(self, budget, max_stocks, stop_loss=0.10, strict_mode=True, 
-                 telegram_token=None, telegram_chat_id=None, feishu_webhook=None):
+                 telegram_token=None, telegram_chat_id=None, feishu_webhook=None,
+                 feishu_app_id=None, feishu_app_secret=None, feishu_target_id=None, feishu_target_type='email'):
         self.portfolio = PortfolioManager(total_budget=budget, max_positions=max_stocks)
         self.stop_loss = stop_loss
         self.strict_mode = strict_mode
@@ -124,7 +125,59 @@ class TradeAssistant:
         self.telegram_token = telegram_token
         self.telegram_chat_id = telegram_chat_id
         self.feishu_webhook = feishu_webhook
+        self.feishu_app_id = feishu_app_id
+        self.feishu_app_secret = feishu_app_secret
+        self.feishu_target_id = feishu_target_id
+        self.feishu_target_type = feishu_target_type
         
+    def _get_feishu_token(self):
+        """获取飞书 Tenant Access Token"""
+        url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+        data = {
+            "app_id": self.feishu_app_id,
+            "app_secret": self.feishu_app_secret
+        }
+        try:
+            response = requests.post(url, json=data, headers=headers, timeout=10)
+            res = response.json()
+            if res.get("code") == 0:
+                return res.get("tenant_access_token")
+            else:
+                print(f"获取飞书Token失败: {res.get('msg')}")
+                return None
+        except Exception as e:
+            print(f"获取飞书Token异常: {e}")
+            return None
+
+    def send_feishu_app_message(self, message):
+        """使用飞书应用API发送消息"""
+        token = self._get_feishu_token()
+        if not token:
+            return
+
+        url = f"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type={self.feishu_target_type}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=utf-8"
+        }
+        
+        data = {
+            "receive_id": self.feishu_target_id,
+            "msg_type": "text",
+            "content": json.dumps({"text": message})
+        }
+
+        try:
+            response = requests.post(url, json=data, headers=headers, timeout=10)
+            res = response.json()
+            if res.get("code") == 0:
+                print("飞书应用消息发送成功")
+            else:
+                print(f"飞书应用消息发送失败: {res}")
+        except Exception as e:
+            print(f"发送飞书应用消息异常: {e}")
+
     def send_feishu_message(self, message):
         """发送飞书消息"""
         if not self.feishu_webhook:
@@ -235,6 +288,9 @@ class TradeAssistant:
             
         if self.feishu_webhook:
             self.send_feishu_message("\n".join(msg_lines))
+            
+        if self.feishu_app_id and self.feishu_app_secret and self.feishu_target_id:
+            self.send_feishu_app_message("\n".join(msg_lines))
         
     def _check_sell_signals(self, today):
         """检查持仓股票的卖出信号"""
@@ -443,6 +499,11 @@ def main():
     parser.add_argument('--telegram-token', type=str, help='Telegram Bot Token')
     parser.add_argument('--telegram-chat-id', type=str, help='Telegram Chat ID')
     parser.add_argument('--feishu-webhook', type=str, help='飞书机器人 Webhook URL')
+    parser.add_argument('--feishu-app-id', type=str, help='飞书应用 App ID')
+    parser.add_argument('--feishu-app-secret', type=str, help='飞书应用 App Secret')
+    parser.add_argument('--feishu-target-id', type=str, help='飞书消息接收者ID (邮箱/OpenID/ChatID)')
+    parser.add_argument('--feishu-target-type', type=str, default='email', choices=['email', 'open_id', 'chat_id', 'user_id'], help='接收者ID类型 (默认email)')
+    
     # 添加用于update的参数
     parser.add_argument('--cmd', type=str, nargs='+', help='更新命令 e.g. "buy sh.688001 50 200"')
     
@@ -454,7 +515,11 @@ def main():
         strict_mode=not args.no_strict,
         telegram_token=args.telegram_token,
         telegram_chat_id=args.telegram_chat_id,
-        feishu_webhook=args.feishu_webhook
+        feishu_webhook=args.feishu_webhook,
+        feishu_app_id=args.feishu_app_id,
+        feishu_app_secret=args.feishu_app_secret,
+        feishu_target_id=args.feishu_target_id,
+        feishu_target_type=args.feishu_target_type
     )
     
     if args.action == 'scan':
