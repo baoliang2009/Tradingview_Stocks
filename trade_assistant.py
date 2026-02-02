@@ -120,7 +120,7 @@ class TradeAssistant:
         self.strict_mode = strict_mode
         self.max_stocks = max_stocks
         
-    def analyze_market(self, board='chinext+star'):
+    def analyze_market(self, board='chinext+star', max_scan=100):
         """全市场扫描分析"""
         print(f"\n{'='*60}")
         print(f"实盘交易助手 - 市场扫描中...")
@@ -135,7 +135,7 @@ class TradeAssistant:
         
         # 2. 如果还有仓位空缺，扫描买入机会
         if len(self.portfolio.positions) < self.max_stocks:
-            self._scan_buy_opportunities(board, today)
+            self._scan_buy_opportunities(board, today, max_scan)
         else:
             print("\n仓位已满，暂不扫描买入机会。")
             
@@ -209,12 +209,12 @@ class TradeAssistant:
                 
         return actions
 
-    def _scan_buy_opportunities(self, board, today):
+    def _scan_buy_opportunities(self, board, today, max_scan=100):
         """扫描市场寻找买入机会"""
-        print("\n[2/2] 扫描潜在买入机会...")
+        print(f"\n[2/2] 扫描潜在买入机会 (限制 {max_scan} 只)...")
         
         # 获取股票列表
-        stock_list = StockDataLoader.get_stock_list(board_filter=board, max_stocks=100)
+        stock_list = StockDataLoader.get_stock_list(board_filter=board, max_stocks=max_scan)
         # 这里为了演示速度限制了数量，实盘可以去掉限制或调大
         # 注意：全市场扫描非常慢，建议实盘时只扫描自选股池
         
@@ -345,6 +345,7 @@ def main():
     parser.add_argument('--board', type=str, default='chinext+star', help='扫描板块')
     parser.add_argument('--action', type=str, choices=['scan', 'update'], default='scan', 
                        help='操作: scan=扫描信号, update=手动更新持仓')
+    parser.add_argument('--max-scan', type=int, default=100, help='扫描最大股票数量 (默认100)')
     # 添加用于update的参数
     parser.add_argument('--cmd', type=str, nargs='+', help='更新命令 e.g. "buy sh.688001 50 200"')
     
@@ -357,7 +358,7 @@ def main():
     )
     
     if args.action == 'scan':
-        assistant.analyze_market(board=args.board)
+        assistant.analyze_market(board=args.board, max_scan=args.max_scan)
         print("\n提示: 如果您根据建议进行了交易，请使用 --action update 更新持仓状态。")
         print("例如: python3 trade_assistant.py --action update --cmd \"buy sh.688052 185.6 200\"")
         
