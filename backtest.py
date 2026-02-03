@@ -19,20 +19,22 @@ class PortfolioBacktester:
                  stop_loss=0.10, take_profit=0.20, trailing_stop=0.0, layered_tp=False,
                  pyramid_enabled=False, strict_mode=True, use_index_filter=False, 
                  index_filter_mode='moderate', index_min_strength=60,
-                 use_atr_stop=False, atr_multiplier=2.0):
+                 use_atr_stop=False, atr_multiplier=2.0,
+                 use_drawdown_exit=False, drawdown_threshold=0.08, min_profit_for_drawdown=0.05):
         self.initial_capital = initial_capital
         self.cash = initial_capital
         self.max_stocks = max_stocks
         self.commission = commission
         self.slippage = slippage
         self.stop_loss = stop_loss  # 固定止损比例（当不使用ATR时）
-        self.take_profit = take_profit
-        self.trailing_stop = trailing_stop  # 移动止盈回落比例
+        self.take_profit = take_profit  # 固定止盈比例（传统模式）
+        self.trailing_stop = trailing_stop  # 移动止盈回落比例（旧版本，已废弃）
         self.layered_tp = layered_tp  # 分层止盈
         self.pyramid_enabled = pyramid_enabled  # 金字塔加仓
         self.strict_mode = strict_mode
         
         # 🆕 指数过滤参数
+        self.use_index_filter = use_index_filter
         self.use_index_filter = use_index_filter
         self.index_filter_mode = index_filter_mode  # 'simple', 'moderate', 'strict'
         self.index_min_strength = index_min_strength
@@ -41,6 +43,11 @@ class PortfolioBacktester:
         # 🆕 ATR动态止损参数
         self.use_atr_stop = use_atr_stop  # 是否使用ATR止损
         self.atr_multiplier = atr_multiplier  # ATR倍数，默认2倍
+        
+        # 🆕 回撤止盈参数
+        self.use_drawdown_exit = use_drawdown_exit  # 是否启用回撤止盈
+        self.drawdown_threshold = drawdown_threshold  # 回撤阈值，如8% = 0.08
+        self.min_profit_for_drawdown = min_profit_for_drawdown  # 启用回撤止盈的最低盈利，如5% = 0.05
         
         self.positions = {}  # {code: {cost, shares, buy_date, ...}}
         self.trades = []
@@ -229,6 +236,33 @@ class PortfolioBacktester:
                         reason = f"最后20%移动止盈(峰值{peak_pct:.1f}%)"
                         positions_to_close.append((code, data['close'], reason))
                         continue
+            
+            # 🆕 回撤止盈逻辑（优先级最高，适用于非分层止盈模式）
+            elif self.use_drawdown_exit:
+                # 跟踪持仓期最高价
+                if 'peak_price' not in pos:
+                    pos['peak_price'] = buy_cost
+                pos['peak_price'] = max(pos['peak_price'], data['high'])
+                
+                # 计算当前相对入场价的盈利
+                current_profit_pct = (data['close'] - buy_cost) / buy_cost
+                
+                # 只有盈利超过最低阈值后才启用回撤止盈
+                if current_profit_pct >= self.min_profit_for_drawdown:
+                    # 计算从最高价的回撤幅度
+                    drawdown_from_peak = (pos['peak_price'] - data['close']) / pos['peak_price']
+                    
+                    # 如果回撤超过阈值，触发止盈
+                    if drawdown_from_peak >= self.drawdown_threshold:
+                        peak_profit_pct = (pos['peak_price'] - buy_cost) / buy_cost * 100
+                        current_profit = (data['close'] - buy_cost) / buy_cost * 100
+                        drawdown_pct = drawdown_from_peak * 100
+                        
+                        action = "SELL"
+                        reason = f"回撤止盈(峰值+{peak_profit_pct:.1f}%,回撤{drawdown_pct:.1f}%)"
+                        sell_price = data['close']
+                        positions_to_close.append((code, sell_price, reason))
+                        continue  # 跳过后续检查
             
             # 🆕 移动止盈逻辑（替代固定止盈）
             elif self.trailing_stop > 0:
@@ -1048,7 +1082,8 @@ def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_
                 trailing_stop=0.0, layered_tp=False, pyramid_enabled=False, enhanced_entry=False,
                 delay=0.1, initial_capital=100000, 
                 use_index_filter=False, index_filter_mode='moderate', index_min_strength=60,
-                use_atr_stop=False, atr_multiplier=2.0):
+                use_atr_stop=False, atr_multiplier=2.0,
+                use_drawdown_exit=False, drawdown_threshold=0.08, min_profit_for_drawdown=0.05):
     """
     运行回测 (组合模式)
     
@@ -1060,9 +1095,12 @@ def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_
     - index_min_strength: 指数最小趋势强度 (0-100)
     - use_atr_stop: 是否使用ATR动态止损
     - atr_multiplier: ATR止损倍数（默认2.0）
+    - use_drawdown_exit: 是否使用回撤止盈
+    - drawdown_threshold: 回撤阈值（默认0.08即8%）
+    - min_profit_for_drawdown: 启用回撤止盈的最低盈利（默认0.05即5%）
     """
     print("=" * 100)
-    print("QQE趋势策略回测系统 (v2.2 ATR动态止损版)")
+    print("QQE趋势策略回测系统 (v2.3 回撤止盈版)")
     print("=" * 100)
     print(f"板块: {board}")
     print(f"股票池: {max_stocks}只")
@@ -1070,12 +1108,17 @@ def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_
     print(f"初始资金: {initial_capital}")
     print(f"模式: {'严格模式' if strict_mode else '标准模式'}{'  | 增强入场' if enhanced_entry else ''}")
     
-    # 🆕 显示止损模式
-    if use_atr_stop:
-        print(f"止损: ATR动态止损({atr_multiplier}倍ATR) | 止盈: {take_profit*100:.0f}% | 移动止盈: {trailing_stop*100:.0f}%")
-    else:
-        print(f"止损: {stop_loss*100:.0f}% | 止盈: {take_profit*100:.0f}% | 移动止盈: {trailing_stop*100:.0f}%")
+    # 🆕 显示止损止盈模式
+    stop_loss_str = f"ATR动态止损({atr_multiplier}倍ATR)" if use_atr_stop else f"{stop_loss*100:.0f}%止损"
     
+    if use_drawdown_exit:
+        take_profit_str = f"回撤止盈(峰值回撤{drawdown_threshold*100:.0f}%,需盈利>{min_profit_for_drawdown*100:.0f}%)"
+    elif trailing_stop > 0:
+        take_profit_str = f"移动止盈(回落{trailing_stop*100:.0f}%)"
+    else:
+        take_profit_str = f"{take_profit*100:.0f}%止盈"
+    
+    print(f"止损: {stop_loss_str} | 止盈: {take_profit_str}")
     print(f"分层止盈: {'启用' if layered_tp else '禁用'} | 金字塔加仓: {'启用' if pyramid_enabled else '禁用'}")
     print(f"指数过滤: {'启用' if use_index_filter else '禁用'}" + 
           (f" ({index_filter_mode}模式, 最小强度{index_min_strength})" if use_index_filter else ""))
@@ -1132,8 +1175,11 @@ def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_
             use_index_filter=use_index_filter,
             index_filter_mode=index_filter_mode,
             index_min_strength=index_min_strength,
-            use_atr_stop=use_atr_stop,  # 🆕 ATR止损
-            atr_multiplier=atr_multiplier  # 🆕 ATR倍数
+            use_atr_stop=use_atr_stop,
+            atr_multiplier=atr_multiplier,
+            use_drawdown_exit=use_drawdown_exit,  # 🆕 回撤止盈
+            drawdown_threshold=drawdown_threshold,  # 🆕 回撤阈值
+            min_profit_for_drawdown=min_profit_for_drawdown  # 🆕 最低盈利要求
         )
         
         equity_curve, trades = engine.run_with_cache(market_data_cache, min_quality=q)
@@ -1230,6 +1276,9 @@ def main():
     parser.add_argument('--index-min-strength', type=int, default=60, help='指数最小趋势强度(0-100)')
     parser.add_argument('--use-atr-stop', action='store_true', help='启用ATR动态止损（替代固定止损比例）')
     parser.add_argument('--atr-multiplier', type=float, default=2.0, help='ATR止损倍数（默认2.0，即入场价-2*ATR）')
+    parser.add_argument('--use-drawdown-exit', action='store_true', help='启用回撤止盈（基于持仓期最高价）')
+    parser.add_argument('--drawdown-threshold', type=float, default=0.08, help='回撤止盈阈值（默认0.08即8%回撤）')
+    parser.add_argument('--min-profit-for-drawdown', type=float, default=0.05, help='启用回撤止盈的最低盈利（默认5%）')
     parser.add_argument('--delay', type=float, default=0.1, help='请求间隔')
     
     args = parser.parse_args()
@@ -1281,8 +1330,11 @@ def main():
         use_index_filter=args.use_index_filter,
         index_filter_mode=args.index_filter_mode,
         index_min_strength=args.index_min_strength,
-        use_atr_stop=args.use_atr_stop,  # 🆕 ATR止损
-        atr_multiplier=args.atr_multiplier  # 🆕 ATR倍数
+        use_atr_stop=args.use_atr_stop,
+        atr_multiplier=args.atr_multiplier,
+        use_drawdown_exit=args.use_drawdown_exit,  # 🆕 回撤止盈
+        drawdown_threshold=args.drawdown_threshold,  # 🆕 回撤阈值
+        min_profit_for_drawdown=args.min_profit_for_drawdown  # 🆕 最低盈利
     )
 
 
