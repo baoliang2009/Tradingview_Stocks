@@ -288,8 +288,18 @@ class PortfolioBacktester:
             'use_breakeven': False
         }
         self.trades.append({
-            'date': date, 'code': code, 'name': name, 'action': 'BUY',
-            'price': price, 'shares': shares, 'amount': -total_out, 'reason': f"Q:{quality:.1f}"
+            'date': date, 
+            'code': code, 
+            'name': name, 
+            'action': 'BUY',
+            'price': price, 
+            'shares': shares, 
+            'cost': cost,
+            'fee': fee,
+            'amount': -total_out, 
+            'quality': quality,
+            'cash_after': self.cash,
+            'reason': f"Q:{quality:.1f}"
         })
 
     def _execute_sell(self, date, code, name, price, is_partial, reason):
@@ -309,11 +319,34 @@ class PortfolioBacktester:
         profit = net_income - buy_cost
         profit_pct = (profit / buy_cost) * 100
         
+        # 持有天数
+        from datetime import datetime as dt
+        try:
+            buy_date = dt.strptime(pos['buy_date'], '%Y-%m-%d')
+            sell_date = dt.strptime(date, '%Y-%m-%d')
+            hold_days = (sell_date - buy_date).days
+        except:
+            hold_days = 0
+        
         self.cash += net_income
         self.trades.append({
-            'date': date, 'code': code, 'name': name, 'action': 'SELL',
-            'price': price, 'shares': shares_to_sell, 'amount': net_income, 
-            'profit': profit, 'profit_pct': profit_pct, 'reason': reason
+            'date': date, 
+            'code': code, 
+            'name': name, 
+            'action': 'SELL',
+            'price': price, 
+            'shares': shares_to_sell, 
+            'income': income,
+            'fee': fee,
+            'amount': net_income, 
+            'buy_price': pos['cost_price'],
+            'buy_date': pos['buy_date'],
+            'hold_days': hold_days,
+            'profit': profit, 
+            'profit_pct': profit_pct,
+            'quality': pos.get('quality', 0),
+            'cash_after': self.cash,
+            'reason': reason
         })
         
         if is_partial:
@@ -920,7 +953,33 @@ def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_
         
         # 保存详情
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        pd.DataFrame(equity_curve).to_csv(f"equity_q{q}_{timestamp}.csv", index=False)
+        
+        # 保存权益曲线
+        equity_file = f"equity_q{q}_{timestamp}.csv"
+        pd.DataFrame(equity_curve).to_csv(equity_file, index=False)
+        
+        # 保存交易记录
+        if trades:
+            trades_file = f"trades_q{q}_{timestamp}.csv"
+            trades_df = pd.DataFrame(trades)
+            
+            # 添加额外的分析列
+            if 'profit' in trades_df.columns:
+                # 计算累计收益
+                trades_df['cumulative_profit'] = trades_df['profit'].fillna(0).cumsum()
+                
+                # 计算胜率（仅统计卖出交易）
+                sell_trades = trades_df[trades_df['action'] == 'SELL'].copy()
+                if len(sell_trades) > 0:
+                    win_trades = len(sell_trades[sell_trades['profit'] > 0])
+                    win_rate = (win_trades / len(sell_trades)) * 100
+                    avg_profit = sell_trades['profit'].mean()
+                    avg_profit_pct = sell_trades['profit_pct'].mean()
+                    
+                    print(f"  交易统计: 胜率 {win_rate:.1f}%, 平均收益 {avg_profit:.2f} ({avg_profit_pct:.2f}%)")
+            
+            trades_df.to_csv(trades_file, index=False, encoding='utf-8-sig')
+            print(f"  已保存: {equity_file}, {trades_file}")
         
     # 汇总对比
     print("\n" + "="*60)
