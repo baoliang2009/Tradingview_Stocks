@@ -18,13 +18,14 @@ class PortfolioBacktester:
     def __init__(self, initial_capital=100000, max_stocks=5, commission=0.0003, slippage=0.001,
                  stop_loss=0.10, take_profit=0.20, trailing_stop=0.0, layered_tp=False,
                  pyramid_enabled=False, strict_mode=True, use_index_filter=False, 
-                 index_filter_mode='moderate', index_min_strength=60):
+                 index_filter_mode='moderate', index_min_strength=60,
+                 use_atr_stop=False, atr_multiplier=2.0):
         self.initial_capital = initial_capital
         self.cash = initial_capital
         self.max_stocks = max_stocks
         self.commission = commission
         self.slippage = slippage
-        self.stop_loss = stop_loss
+        self.stop_loss = stop_loss  # 固定止损比例（当不使用ATR时）
         self.take_profit = take_profit
         self.trailing_stop = trailing_stop  # 移动止盈回落比例
         self.layered_tp = layered_tp  # 分层止盈
@@ -36,6 +37,10 @@ class PortfolioBacktester:
         self.index_filter_mode = index_filter_mode  # 'simple', 'moderate', 'strict'
         self.index_min_strength = index_min_strength
         self.index_filter = IndexTrendFilter() if use_index_filter else None
+        
+        # 🆕 ATR动态止损参数
+        self.use_atr_stop = use_atr_stop  # 是否使用ATR止损
+        self.atr_multiplier = atr_multiplier  # ATR倍数，默认2倍
         
         self.positions = {}  # {code: {cost, shares, buy_date, ...}}
         self.trades = []
@@ -145,7 +150,8 @@ class PortfolioBacktester:
                     'close': row['close'],
                     'buy_signal': has_signal,
                     'sell_signal': bool(row['sell_signal']) if 'sell_signal' in row else False,
-                    'quality': row.get('signal_quality', 0) if self.strict_mode else 0
+                    'quality': row.get('signal_quality', 0) if self.strict_mode else 0,
+                    'atr': row.get('atr', 0)  # 🆕 添加ATR数据
                 }
         
         print(f"DEBUG: 数据转换完成，共发现 {total_buy_signals} 个原始买入信号 (严格模式: {self.strict_mode}, 信号列: {signal_col})")
@@ -259,15 +265,21 @@ class PortfolioBacktester:
             if pos.get('use_breakeven'):
                 stop_price = buy_cost * (1.01) 
             else:
-                # 🆕 渐进式止损：根据持有天数调整止损比例
-                if hold_days < 5:
-                    stop_loss_pct = min(self.stop_loss * 1.2, 0.12)  # 前5天放宽20%
-                elif hold_days < 15:
-                    stop_loss_pct = self.stop_loss  # 5-15天正常
+                # 🆕 ATR动态止损 vs 固定比例止损
+                if self.use_atr_stop and 'entry_atr' in pos and pos['entry_atr'] > 0:
+                    # ATR动态止损: 止损价 = 入场价 - ATR_multiplier * ATR
+                    stop_price = buy_cost - (self.atr_multiplier * pos['entry_atr'])
                 else:
-                    stop_loss_pct = self.stop_loss * 0.8  # 15天后收紧20%
-                
-                stop_price = buy_cost * (1 - stop_loss_pct)
+                    # 固定比例止损（原逻辑）
+                    # 🆕 渐进式止损：根据持有天数调整止损比例
+                    if hold_days < 5:
+                        stop_loss_pct = min(self.stop_loss * 1.2, 0.12)  # 前5天放宽20%
+                    elif hold_days < 15:
+                        stop_loss_pct = self.stop_loss  # 5-15天正常
+                    else:
+                        stop_loss_pct = self.stop_loss * 0.8  # 15天后收紧20%
+                    
+                    stop_price = buy_cost * (1 - stop_loss_pct)
                 
             if data['low'] <= stop_price:
                 action = "SELL"
@@ -382,7 +394,8 @@ class PortfolioBacktester:
                             'code': code, 
                             'name': data['name'],
                             'price': data['close'],
-                            'quality': data['quality']
+                            'quality': data['quality'],
+                            'atr': data.get('atr', 0)  # 🆕 添加ATR数据
                         })
                     else:
                         filtered_by_quality += 1
@@ -426,7 +439,9 @@ class PortfolioBacktester:
                 max_shares = int(available_cash / cost_with_fee) // 100 * 100
                 
                 if max_shares >= 100:
-                    self._execute_buy(date_str, item['code'], item['name'], item['price'], max_shares, item['quality'])
+                    # 🆕 传递ATR数据
+                    item_atr = item.get('atr', 0)
+                    self._execute_buy(date_str, item['code'], item['name'], item['price'], max_shares, item['quality'], item_atr)
                 else:
                     pass
         
@@ -444,7 +459,7 @@ class PortfolioBacktester:
             'position_count': len(self.positions)
         })
 
-    def _execute_buy(self, date, code, name, price, shares, quality):
+    def _execute_buy(self, date, code, name, price, shares, quality, atr=0):
         cost = shares * price
         fee = max(5, cost * self.commission)
         total_out = cost + fee
@@ -459,7 +474,8 @@ class PortfolioBacktester:
             'last_close': price,
             'quality': quality,
             'has_taken_profit': False,
-            'use_breakeven': False
+            'use_breakeven': False,
+            'entry_atr': atr  # 🆕 记录入场时的ATR
         }
         self.trades.append({
             'date': date, 
@@ -1031,7 +1047,8 @@ def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_
                 strict_mode=True, history_days=250, stop_loss=0.10, take_profit=0.20, 
                 trailing_stop=0.0, layered_tp=False, pyramid_enabled=False, enhanced_entry=False,
                 delay=0.1, initial_capital=100000, 
-                use_index_filter=False, index_filter_mode='moderate', index_min_strength=60):
+                use_index_filter=False, index_filter_mode='moderate', index_min_strength=60,
+                use_atr_stop=False, atr_multiplier=2.0):
     """
     运行回测 (组合模式)
     
@@ -1041,16 +1058,24 @@ def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_
     - use_index_filter: 是否启用指数趋势过滤
     - index_filter_mode: 指数过滤模式 ('simple', 'moderate', 'strict')
     - index_min_strength: 指数最小趋势强度 (0-100)
+    - use_atr_stop: 是否使用ATR动态止损
+    - atr_multiplier: ATR止损倍数（默认2.0）
     """
     print("=" * 100)
-    print("QQE趋势策略回测系统 (v2.1 指数过滤版)")
+    print("QQE趋势策略回测系统 (v2.2 ATR动态止损版)")
     print("=" * 100)
     print(f"板块: {board}")
     print(f"股票池: {max_stocks}只")
     print(f"最大持仓: {max_positions}只")
     print(f"初始资金: {initial_capital}")
     print(f"模式: {'严格模式' if strict_mode else '标准模式'}{'  | 增强入场' if enhanced_entry else ''}")
-    print(f"止损: {stop_loss*100:.0f}% | 止盈: {take_profit*100:.0f}% | 移动止盈: {trailing_stop*100:.0f}%")
+    
+    # 🆕 显示止损模式
+    if use_atr_stop:
+        print(f"止损: ATR动态止损({atr_multiplier}倍ATR) | 止盈: {take_profit*100:.0f}% | 移动止盈: {trailing_stop*100:.0f}%")
+    else:
+        print(f"止损: {stop_loss*100:.0f}% | 止盈: {take_profit*100:.0f}% | 移动止盈: {trailing_stop*100:.0f}%")
+    
     print(f"分层止盈: {'启用' if layered_tp else '禁用'} | 金字塔加仓: {'启用' if pyramid_enabled else '禁用'}")
     print(f"指数过滤: {'启用' if use_index_filter else '禁用'}" + 
           (f" ({index_filter_mode}模式, 最小强度{index_min_strength})" if use_index_filter else ""))
@@ -1106,7 +1131,9 @@ def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_
             strict_mode=strict_mode,
             use_index_filter=use_index_filter,
             index_filter_mode=index_filter_mode,
-            index_min_strength=index_min_strength
+            index_min_strength=index_min_strength,
+            use_atr_stop=use_atr_stop,  # 🆕 ATR止损
+            atr_multiplier=atr_multiplier  # 🆕 ATR倍数
         )
         
         equity_curve, trades = engine.run_with_cache(market_data_cache, min_quality=q)
@@ -1201,6 +1228,8 @@ def main():
     parser.add_argument('--index-filter-mode', type=str, default='moderate', choices=['simple', 'moderate', 'strict'], 
                        help='指数过滤模式: simple(简单均线), moderate(多均线), strict(QQE)')
     parser.add_argument('--index-min-strength', type=int, default=60, help='指数最小趋势强度(0-100)')
+    parser.add_argument('--use-atr-stop', action='store_true', help='启用ATR动态止损（替代固定止损比例）')
+    parser.add_argument('--atr-multiplier', type=float, default=2.0, help='ATR止损倍数（默认2.0，即入场价-2*ATR）')
     parser.add_argument('--delay', type=float, default=0.1, help='请求间隔')
     
     args = parser.parse_args()
@@ -1251,7 +1280,9 @@ def main():
         delay=args.delay,
         use_index_filter=args.use_index_filter,
         index_filter_mode=args.index_filter_mode,
-        index_min_strength=args.index_min_strength
+        index_min_strength=args.index_min_strength,
+        use_atr_stop=args.use_atr_stop,  # 🆕 ATR止损
+        atr_multiplier=args.atr_multiplier  # 🆕 ATR倍数
     )
 
 

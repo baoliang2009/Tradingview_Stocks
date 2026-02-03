@@ -46,6 +46,33 @@ class QQETrendStrategy:
 
     def _calculate_ema(self, series: pd.Series, period: int) -> pd.Series:
         return series.ewm(span=period, adjust=False).mean()
+    
+    def _calculate_atr(self, data: pd.DataFrame, period: int = 14) -> pd.Series:
+        """
+        计算ATR (Average True Range)
+        
+        Args:
+            data: DataFrame with columns: high, low, close
+            period: ATR计算周期，默认14
+            
+        Returns:
+            pd.Series: ATR值
+        """
+        high = data['high']
+        low = data['low']
+        close = data['close']
+        
+        # True Range = max(high-low, abs(high-prev_close), abs(low-prev_close))
+        tr1 = high - low
+        tr2 = abs(high - close.shift(1))
+        tr3 = abs(low - close.shift(1))
+        
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        
+        # ATR = EMA(TR, period)
+        atr = self._calculate_ema(tr, period)
+        
+        return atr
 
     def _calculate_sma(self, series: pd.Series, period: int) -> pd.Series:
         return series.rolling(window=period).mean()
@@ -257,6 +284,9 @@ class QQETrendStrategy:
         
         result['buy_signal'] = long_condition & ~(long_condition.shift(1).fillna(False).astype(bool))
         result['sell_signal'] = short_condition & ~(short_condition.shift(1).fillna(False).astype(bool))
+        
+        # 🆕 添加ATR计算（用于动态止损）
+        result['atr'] = self._calculate_atr(data, period=14)
         
         return result
 
