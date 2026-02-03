@@ -353,7 +353,8 @@ def qqe_trend_strategy(
     ma_period: int = 9,
     alma_offset: float = 0.85,
     alma_sigma: int = 6,
-    strict_mode: bool = False
+    strict_mode: bool = False,
+    enhanced_entry: bool = False  # 🆕 增强入场过滤
 ) -> pd.DataFrame:
     """
     Generate trading signals based on QQE + Trend Strategy.
@@ -416,6 +417,30 @@ def qqe_trend_strategy(
     )
     
     if strict_mode:
-        return strategy.generate_signals_strict(data)
+        result = strategy.generate_signals_strict(data)
     else:
-        return strategy.generate_signals(data)
+        result = strategy.generate_signals(data)
+    
+    # 🆕 增强入场过滤：要求3天连续QQE上涨 + 成交量放大1.5倍
+    if enhanced_entry:
+        # 1. 3天连续QQE长期趋势
+        long_3day = (result['long_condition'] &
+                     result['long_condition'].shift(1).fillna(False) &
+                     result['long_condition'].shift(2).fillna(False))
+        
+        # 2. 成交量 > 60日均量的1.5倍
+        if 'volume' in data.columns:
+            volume_ma_60 = data['volume'].rolling(window=60).mean()
+            volume_surge_strong = data['volume'] > (volume_ma_60 * 1.5)
+        else:
+            volume_surge_strong = pd.Series(True, index=data.index)
+        
+        # 3. 价格突破20日高点
+        high_20 = data['high'].rolling(window=20).max().shift(1)
+        breakout_20day = data['close'] > high_20
+        
+        # 更新买入信号：需要满足所有增强条件
+        enhanced_buy = long_3day & volume_surge_strong & breakout_20day
+        result['buy_signal'] = enhanced_buy & ~(enhanced_buy.shift(1).fillna(False).astype(bool))
+    
+    return result

@@ -15,7 +15,8 @@ import random
 class PortfolioBacktester:
     """组合回测引擎（资金池模式）"""
     def __init__(self, initial_capital=100000, max_stocks=5, commission=0.0003, slippage=0.001,
-                 stop_loss=0.10, take_profit=0.20, trailing_stop=0.0, strict_mode=True):
+                 stop_loss=0.10, take_profit=0.20, trailing_stop=0.0, layered_tp=False,
+                 pyramid_enabled=False, strict_mode=True):
         self.initial_capital = initial_capital
         self.cash = initial_capital
         self.max_stocks = max_stocks
@@ -24,6 +25,8 @@ class PortfolioBacktester:
         self.stop_loss = stop_loss
         self.take_profit = take_profit
         self.trailing_stop = trailing_stop  # 移动止盈回落比例
+        self.layered_tp = layered_tp  # 分层止盈
+        self.pyramid_enabled = pyramid_enabled  # 金字塔加仓
         self.strict_mode = strict_mode
         
         self.positions = {}  # {code: {cost, shares, buy_date, ...}}
@@ -151,7 +154,7 @@ class PortfolioBacktester:
         positions_to_close = [] 
         current_positions_value = 0
         
-        for code, pos in self.positions.items():
+        for code, pos in list(self.positions.items()):  # 🔧 Fix: Convert to list to avoid iteration error
             if code not in daily_market:
                 current_positions_value += pos['shares'] * pos['last_close']
                 continue
@@ -172,8 +175,42 @@ class PortfolioBacktester:
             except:
                 hold_days = 0
             
+            # 🆕 分层止盈逻辑 (多级止盈，逐步减仓)
+            if self.layered_tp:
+                current_profit_pct = (data['close'] - buy_cost) / buy_cost
+                if 'tp_levels' not in pos:
+                    # 初始化止盈层级: [20%, 40%, 60%, 80%, 100%]
+                    pos['tp_levels'] = [0.20, 0.40, 0.60, 0.80, 1.00]
+                    pos['tp_sold'] = []  # 记录已卖出的层级
+                
+                # 检查是否触及新的止盈层级
+                for level in pos['tp_levels']:
+                    if level not in pos['tp_sold'] and current_profit_pct >= level:
+                        # 每层卖出20%原始仓位
+                        sell_ratio = 0.20
+                        reason = f"分层止盈{int(level*100)}%"
+                        self._execute_sell(date_str, code, data['name'], data['close'], 
+                                         sell_ratio=sell_ratio, reason=reason)
+                        pos['tp_sold'].append(level)
+                        
+                        # 如果卖完80%，剩余20%使用移动止盈
+                        if len(pos['tp_sold']) >= 4:  # 已卖80%
+                            pos['use_trailing'] = True
+                            if 'max_price' not in pos:
+                                pos['max_price'] = data['high']
+                
+                # 剩余20%使用15%移动止盈
+                if pos.get('use_trailing'):
+                    pos['max_price'] = max(pos.get('max_price', buy_cost), data['high'])
+                    trailing_stop_price = pos['max_price'] * 0.85  # 15%回撤
+                    if data['close'] < trailing_stop_price and pos['shares'] > 0:
+                        peak_pct = (pos['max_price'] - buy_cost) / buy_cost * 100
+                        reason = f"最后20%移动止盈(峰值{peak_pct:.1f}%)"
+                        positions_to_close.append((code, data['close'], reason))
+                        continue
+            
             # 🆕 移动止盈逻辑（替代固定止盈）
-            if self.trailing_stop > 0:
+            elif self.trailing_stop > 0:
                 # 跟踪历史最高价
                 if 'max_price' not in pos:
                     pos['max_price'] = buy_cost
@@ -241,6 +278,60 @@ class PortfolioBacktester:
                 name = self.positions[code]['name']
                 self._execute_sell(date_str, code, name, price, is_partial=False, reason=reason)
 
+        # --- 1.5. 金字塔加仓检查 ---
+        if self.pyramid_enabled:
+            for code, pos in list(self.positions.items()):
+                if code not in daily_market:
+                    continue
+                data = daily_market[code]
+                buy_cost = pos['cost_price']
+                current_profit_pct = (data['close'] - buy_cost) / buy_cost
+                
+                # 初始化金字塔状态
+                if 'pyramid_levels' not in pos:
+                    pos['pyramid_levels'] = []  # 已加仓层级
+                
+                # 金字塔加仓层级: +5%, +10%
+                pyramid_thresholds = [0.05, 0.10]
+                
+                for threshold in pyramid_thresholds:
+                    if threshold not in pos['pyramid_levels'] and current_profit_pct >= threshold:
+                        # 加仓20%的原始仓位
+                        target_pos_size = self.initial_capital / self.max_stocks
+                        add_shares = int(pos['initial_shares'] * 0.20) // 100 * 100
+                        cost_with_fee = data['close'] * (1 + self.commission) * add_shares
+                        
+                        if add_shares >= 100 and self.cash >= cost_with_fee:
+                            # 执行加仓
+                            cost = add_shares * data['close']
+                            fee = max(5, cost * self.commission)
+                            total_out = cost + fee
+                            
+                            self.cash -= total_out
+                            pos['shares'] += add_shares
+                            pos['pyramid_levels'].append(threshold)
+                            
+                            # 更新平均成本
+                            total_shares = pos['shares']
+                            total_cost = (pos['cost_price'] * (pos['shares'] - add_shares)) + (data['close'] * add_shares)
+                            pos['cost_price'] = total_cost / total_shares
+                            
+                            # 记录加仓交易
+                            self.trades.append({
+                                'date': date_str,
+                                'code': code,
+                                'name': pos['name'],
+                                'action': 'BUY_ADD',
+                                'price': data['close'],
+                                'shares': add_shares,
+                                'cost': cost,
+                                'fee': fee,
+                                'amount': -total_out,
+                                'quality': pos.get('quality', 0),
+                                'cash_after': self.cash,
+                                'reason': f'金字塔加仓{int(threshold*100)}%'
+                            })
+
         # --- 2. 检查买入 ---
         candidates = []
         # DEBUG: 检查当天是否有信号但没被选中
@@ -281,6 +372,10 @@ class PortfolioBacktester:
                 # 资金分配模型
                 target_pos_size = self.initial_capital / self.max_stocks
                 available_cash = min(self.cash, target_pos_size)
+                
+                # 🆕 金字塔模式：初始只买20%，后续加仓
+                if self.pyramid_enabled:
+                    available_cash = available_cash * 0.20  # 初始只用20%资金
                 
                 # 预留手续费
                 cost_with_fee = item['price'] * (1 + self.commission)
@@ -324,6 +419,7 @@ class PortfolioBacktester:
         self.positions[code] = {
             'name': name,
             'shares': shares,
+            'initial_shares': shares,  # 用于分层止盈计算
             'cost_price': price,
             'buy_date': date,
             'last_close': price,
@@ -346,11 +442,19 @@ class PortfolioBacktester:
             'reason': f"Q:{quality:.1f}"
         })
 
-    def _execute_sell(self, date, code, name, price, is_partial, reason):
+    def _execute_sell(self, date, code, name, price, is_partial=False, sell_ratio=None, reason=""):
         pos = self.positions[code]
         
         shares_to_sell = pos['shares']
-        if is_partial:
+        if sell_ratio is not None:
+            # 按比例卖出（用于分层止盈）
+            # 注意: sell_ratio 是相对于**原始仓位**的比例
+            if 'initial_shares' not in pos:
+                pos['initial_shares'] = pos['shares']
+            shares_to_sell = int(pos['initial_shares'] * sell_ratio) // 100 * 100
+            if shares_to_sell == 0 or shares_to_sell > pos['shares']:
+                return  # 无法卖出或超出当前持仓
+        elif is_partial:
             shares_to_sell = shares_to_sell // 2 // 100 * 100 # 卖一半
             if shares_to_sell == 0: return # 股数太少无法分批，略过
             
@@ -891,7 +995,8 @@ class StockDataLoader:
 
 def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_thresholds=None,
                 strict_mode=True, history_days=250, stop_loss=0.10, take_profit=0.20, 
-                trailing_stop=0.0, delay=0.1, initial_capital=100000):
+                trailing_stop=0.0, layered_tp=False, pyramid_enabled=False, enhanced_entry=False,
+                delay=0.1, initial_capital=100000):
     """
     运行回测 (组合模式)
     
@@ -906,8 +1011,9 @@ def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_
     print(f"股票池: {max_stocks}只")
     print(f"最大持仓: {max_positions}只")
     print(f"初始资金: {initial_capital}")
-    print(f"模式: {'严格模式' if strict_mode else '标准模式'}")
+    print(f"模式: {'严格模式' if strict_mode else '标准模式'}{'  | 增强入场' if enhanced_entry else ''}")
     print(f"止损: {stop_loss*100:.0f}% | 止盈: {take_profit*100:.0f}% | 移动止盈: {trailing_stop*100:.0f}%")
+    print(f"分层止盈: {'启用' if layered_tp else '禁用'} | 金字塔加仓: {'启用' if pyramid_enabled else '禁用'}")
     print(f"评测阈值: {quality_thresholds}")
     print("=" * 100)
     
@@ -930,7 +1036,7 @@ def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_
             df = StockDataLoader.get_stock_data(stock['code'], days=history_days)
             if df is not None and len(df) >= 60:
                 # 预计算策略
-                result = qqe_trend_strategy(df, strict_mode=strict_mode)
+                result = qqe_trend_strategy(df, strict_mode=strict_mode, enhanced_entry=enhanced_entry)
                 market_data_cache[stock['code']] = {
                     'name': stock['name'],
                     'data': result
@@ -955,6 +1061,8 @@ def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_
             stop_loss=stop_loss,
             take_profit=take_profit,
             trailing_stop=trailing_stop,
+            layered_tp=layered_tp,
+            pyramid_enabled=pyramid_enabled,
             strict_mode=strict_mode
         )
         
@@ -1048,6 +1156,9 @@ def main():
     parser.add_argument('--stop-loss', type=float, default=0.10, help='止损比例')
     parser.add_argument('--take-profit', type=float, default=0.20, help='动态止盈比例')
     parser.add_argument('--trailing-stop', type=float, default=0.0, help='移动止盈回落比例 (0=禁用, 推荐0.15)')
+    parser.add_argument('--layered-tp', action='store_true', help='启用分层止盈(20%,40%,60%,80%,100%)')
+    parser.add_argument('--pyramid', action='store_true', help='启用金字塔加仓(初始20%, +5%/+10%各加20%)')
+    parser.add_argument('--enhanced-entry', action='store_true', help='启用增强入场(3日QQE+1.5倍量+突破20日高)')
     parser.add_argument('--delay', type=float, default=0.1, help='请求间隔')
     
     args = parser.parse_args()
@@ -1092,6 +1203,9 @@ def main():
         stop_loss=args.stop_loss,
         take_profit=args.take_profit,
         trailing_stop=args.trailing_stop,
+        layered_tp=args.layered_tp,
+        pyramid_enabled=args.pyramid,
+        enhanced_entry=args.enhanced_entry,
         delay=args.delay
     )
 
