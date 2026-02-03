@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from qqe_trend_strategy import qqe_trend_strategy
+from index_trend_filter import IndexTrendFilter
 import argparse
 import time
 import random
@@ -16,7 +17,8 @@ class PortfolioBacktester:
     """组合回测引擎（资金池模式）"""
     def __init__(self, initial_capital=100000, max_stocks=5, commission=0.0003, slippage=0.001,
                  stop_loss=0.10, take_profit=0.20, trailing_stop=0.0, layered_tp=False,
-                 pyramid_enabled=False, strict_mode=True):
+                 pyramid_enabled=False, strict_mode=True, use_index_filter=False, 
+                 index_filter_mode='moderate', index_min_strength=60):
         self.initial_capital = initial_capital
         self.cash = initial_capital
         self.max_stocks = max_stocks
@@ -29,10 +31,23 @@ class PortfolioBacktester:
         self.pyramid_enabled = pyramid_enabled  # 金字塔加仓
         self.strict_mode = strict_mode
         
+        # 🆕 指数过滤参数
+        self.use_index_filter = use_index_filter
+        self.index_filter_mode = index_filter_mode  # 'simple', 'moderate', 'strict'
+        self.index_min_strength = index_min_strength
+        self.index_filter = IndexTrendFilter() if use_index_filter else None
+        
         self.positions = {}  # {code: {cost, shares, buy_date, ...}}
         self.trades = []
         self.equity_curve = []  # [{date, equity, cash, positions_val}]
         self.daily_logs = []
+        
+        # 统计信息
+        self.index_filter_stats = {
+            'total_signals': 0,
+            'filtered_by_index': 0,
+            'passed_index_filter': 0
+        }
 
     def run(self, stock_list, history_days=250, min_quality=60):
         """执行组合回测"""
@@ -337,14 +352,32 @@ class PortfolioBacktester:
         # DEBUG: 检查当天是否有信号但没被选中
         daily_signals = 0
         filtered_by_quality = 0
+        filtered_by_index = 0
         
         if len(self.positions) < self.max_stocks:
             for code, data in daily_market.items():
                 if data['buy_signal']:
                     daily_signals += 1
+                    self.index_filter_stats['total_signals'] += 1
+                    
                     if code in self.positions:
                         pass
                     elif data['quality'] >= min_quality:
+                        # 🆕 指数趋势过滤
+                        if self.use_index_filter:
+                            allow_entry, index_code, index_strength = self.index_filter.should_allow_entry(
+                                code, current_date=date_str, 
+                                mode=self.index_filter_mode, 
+                                min_strength=self.index_min_strength
+                            )
+                            
+                            if not allow_entry:
+                                filtered_by_index += 1
+                                self.index_filter_stats['filtered_by_index'] += 1
+                                continue
+                            else:
+                                self.index_filter_stats['passed_index_filter'] += 1
+                        
                         candidates.append({
                             'code': code, 
                             'name': data['name'],
@@ -356,7 +389,8 @@ class PortfolioBacktester:
             
             # DEBUG: 首次买入信号时打印诊断信息
             if daily_signals > 0 and len(self.trades) == 0:
-                print(f"\n[调试] {date_str}: 发现 {daily_signals} 个买入信号, 通过质量筛选 {len(candidates)} 个 (最低质量={min_quality}), 被质量过滤 {filtered_by_quality} 个")
+                index_info = f", 被指数过滤 {filtered_by_index} 个" if self.use_index_filter else ""
+                print(f"\n[调试] {date_str}: 发现 {daily_signals} 个买入信号, 通过质量筛选 {len(candidates) + filtered_by_index} 个 (最低质量={min_quality}), 被质量过滤 {filtered_by_quality} 个{index_info}")
                 if len(candidates) > 0:
                     print(f"  候选质量范围: {min([c['quality'] for c in candidates]):.1f} - {max([c['quality'] for c in candidates]):.1f}")
             
@@ -996,16 +1030,20 @@ class StockDataLoader:
 def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_thresholds=None,
                 strict_mode=True, history_days=250, stop_loss=0.10, take_profit=0.20, 
                 trailing_stop=0.0, layered_tp=False, pyramid_enabled=False, enhanced_entry=False,
-                delay=0.1, initial_capital=100000):
+                delay=0.1, initial_capital=100000, 
+                use_index_filter=False, index_filter_mode='moderate', index_min_strength=60):
     """
     运行回测 (组合模式)
     
     参数说明:
     - max_stocks: 股票池大小（从市场选取多少只股票）
     - max_positions: 最大持仓数量（同时持有多少只股票）
+    - use_index_filter: 是否启用指数趋势过滤
+    - index_filter_mode: 指数过滤模式 ('simple', 'moderate', 'strict')
+    - index_min_strength: 指数最小趋势强度 (0-100)
     """
     print("=" * 100)
-    print("QQE趋势策略回测系统 (v2.0 资金池回测版)")
+    print("QQE趋势策略回测系统 (v2.1 指数过滤版)")
     print("=" * 100)
     print(f"板块: {board}")
     print(f"股票池: {max_stocks}只")
@@ -1014,6 +1052,8 @@ def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_
     print(f"模式: {'严格模式' if strict_mode else '标准模式'}{'  | 增强入场' if enhanced_entry else ''}")
     print(f"止损: {stop_loss*100:.0f}% | 止盈: {take_profit*100:.0f}% | 移动止盈: {trailing_stop*100:.0f}%")
     print(f"分层止盈: {'启用' if layered_tp else '禁用'} | 金字塔加仓: {'启用' if pyramid_enabled else '禁用'}")
+    print(f"指数过滤: {'启用' if use_index_filter else '禁用'}" + 
+          (f" ({index_filter_mode}模式, 最小强度{index_min_strength})" if use_index_filter else ""))
     print(f"评测阈值: {quality_thresholds}")
     print("=" * 100)
     
@@ -1063,22 +1103,20 @@ def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_
             trailing_stop=trailing_stop,
             layered_tp=layered_tp,
             pyramid_enabled=pyramid_enabled,
-            strict_mode=strict_mode
+            strict_mode=strict_mode,
+            use_index_filter=use_index_filter,
+            index_filter_mode=index_filter_mode,
+            index_min_strength=index_min_strength
         )
         
-        # 为了避免修改 PortfolioBacktester 太多，我们这里动态注入预加载的数据
-        # 或者我们稍微修改 PortfolioBacktester 的 run 方法接收 cache
-        # 这里为了简单，我们还是让 PortfolioBacktester 自己去处理，
-        # 但既然我们已经写了 PortfolioBacktester.run 会重新下载，这会很慢。
-        # 让我重构 PortfolioBacktester.run 支持传入已处理的数据。
-        
-        # 临时方案：这里直接修改 PortfolioBacktester 的 run 方法会更好，
-        # 但为了不来回改文件，我将在这里手动组装数据传给 engine 的 _process_daily_step
-        # 或者是修改 PortfolioBacktester.run 接受 preloaded_data
-        
-        # 鉴于代码结构，最好的办法是修改 PortfolioBacktester 让它支持传入 data_cache
-        # 我会在下面紧接着修改 PortfolioBacktester
         equity_curve, trades = engine.run_with_cache(market_data_cache, min_quality=q)
+        
+        # 打印指数过滤统计
+        if use_index_filter:
+            stats = engine.index_filter_stats
+            if stats['total_signals'] > 0:
+                filter_rate = (stats['filtered_by_index'] / stats['total_signals']) * 100
+                print(f"  指数过滤统计: 总信号 {stats['total_signals']}, 被过滤 {stats['filtered_by_index']} ({filter_rate:.1f}%), 通过 {stats['passed_index_filter']}")
         
         if not equity_curve:
             print("  无交易产生。")
@@ -1159,6 +1197,10 @@ def main():
     parser.add_argument('--layered-tp', action='store_true', help='启用分层止盈(20%,40%,60%,80%,100%)')
     parser.add_argument('--pyramid', action='store_true', help='启用金字塔加仓(初始20%, +5%/+10%各加20%)')
     parser.add_argument('--enhanced-entry', action='store_true', help='启用增强入场(3日QQE+1.5倍量+突破20日高)')
+    parser.add_argument('--use-index-filter', action='store_true', help='启用指数趋势过滤（根据板块指数多空）')
+    parser.add_argument('--index-filter-mode', type=str, default='moderate', choices=['simple', 'moderate', 'strict'], 
+                       help='指数过滤模式: simple(简单均线), moderate(多均线), strict(QQE)')
+    parser.add_argument('--index-min-strength', type=int, default=60, help='指数最小趋势强度(0-100)')
     parser.add_argument('--delay', type=float, default=0.1, help='请求间隔')
     
     args = parser.parse_args()
@@ -1206,7 +1248,10 @@ def main():
         layered_tp=args.layered_tp,
         pyramid_enabled=args.pyramid,
         enhanced_entry=args.enhanced_entry,
-        delay=args.delay
+        delay=args.delay,
+        use_index_filter=args.use_index_filter,
+        index_filter_mode=args.index_filter_mode,
+        index_min_strength=args.index_min_strength
     )
 
 
