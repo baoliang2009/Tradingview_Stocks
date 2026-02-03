@@ -45,6 +45,14 @@ python3 backtest.py --stop-loss 0.08 --take-profit 0.25 --budget 300000
 - 止损8%
 - 止盈25%
 
+### 6. 使用移动止盈（推荐用于捕获大涨）
+```bash
+python3 backtest.py --trailing-stop 0.15 --budget 300000
+```
+- 价格超过20%盈利后启用移动止盈
+- 当价格从峰值回落15%时自动卖出
+- **优势**: 捕获50%-100%+的大涨行情
+
 ---
 
 ## ⚠️ 常见错误
@@ -102,7 +110,17 @@ python3 backtest.py --max-stocks 200 --max-positions 10
 |------|--------|------|
 | `--budget` | 100000 | 初始资金（元） |
 | `--stop-loss` | 0.10 | 止损比例 (10%) |
-| `--take-profit` | 0.20 | 止盈比例 (20%) |
+| `--take-profit` | 0.20 | 固定止盈比例 (20%) |
+| `--trailing-stop` | 0.0 | 移动止盈回落比例 (0=禁用) |
+
+**移动止盈说明**:
+- 当 `--trailing-stop` > 0 时，替代固定止盈机制
+- 价格超过 `--take-profit` 阈值后启用移动止盈
+- 价格从峰值回落超过 `--trailing-stop` 时触发卖出
+- **示例**: `--take-profit 0.20 --trailing-stop 0.15`
+  - 盈利超过20%后启用移动止盈
+  - 从峰值回落15%时卖出
+  - 若股票涨到+100%，会在约+85%处卖出（而非+20%）
 
 ### 策略模式
 | 参数 | 默认 | 说明 |
@@ -202,17 +220,21 @@ python3 backtest.py \
   --board "300,00"
 ```
 
-### 激进策略（接受所有信号 + 多持仓）
+### 激进策略（移动止盈捕获大涨）
 ```bash
 python3 backtest.py \
   --budget 500000 \
   --max-stocks 100 \
-  --max-positions 15 \
+  --max-positions 10 \
   --no-strict \
-  --stop-loss 0.12 \
-  --take-profit 0.15 \
-  --board chinext+star
+  --stop-loss 0.10 \
+  --take-profit 0.20 \
+  --trailing-stop 0.15 \
+  --board "300,00"
 ```
+- 使用移动止盈让利润奔跑
+- 适合捕获50%-100%+的大涨行情
+- 回撤15%时止盈
 
 ### 对比测试（多个阈值）
 ```bash

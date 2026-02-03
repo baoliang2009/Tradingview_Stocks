@@ -15,7 +15,7 @@ import random
 class PortfolioBacktester:
     """组合回测引擎（资金池模式）"""
     def __init__(self, initial_capital=100000, max_stocks=5, commission=0.0003, slippage=0.001,
-                 stop_loss=0.10, take_profit=0.20, strict_mode=True):
+                 stop_loss=0.10, take_profit=0.20, trailing_stop=0.0, strict_mode=True):
         self.initial_capital = initial_capital
         self.cash = initial_capital
         self.max_stocks = max_stocks
@@ -23,6 +23,7 @@ class PortfolioBacktester:
         self.slippage = slippage
         self.stop_loss = stop_loss
         self.take_profit = take_profit
+        self.trailing_stop = trailing_stop  # 移动止盈回落比例
         self.strict_mode = strict_mode
         
         self.positions = {}  # {code: {cost, shares, buy_date, ...}}
@@ -171,7 +172,31 @@ class PortfolioBacktester:
             except:
                 hold_days = 0
             
-            if not pos.get('has_taken_profit') and self.take_profit > 0:
+            # 🆕 移动止盈逻辑（替代固定止盈）
+            if self.trailing_stop > 0:
+                # 跟踪历史最高价
+                if 'max_price' not in pos:
+                    pos['max_price'] = buy_cost
+                pos['max_price'] = max(pos['max_price'], data['high'])
+                
+                current_profit_pct = (data['close'] - buy_cost) / buy_cost
+                
+                # 只有盈利超过初始止盈阈值后才启用移动止盈
+                if current_profit_pct > self.take_profit:
+                    trailing_stop_price = pos['max_price'] * (1 - self.trailing_stop)
+                    
+                    # 如果价格从峰值回落超过阈值，触发移动止盈
+                    if data['close'] < trailing_stop_price:
+                        peak_profit_pct = (pos['max_price'] - buy_cost) / buy_cost * 100
+                        current_profit = (data['close'] - buy_cost) / buy_cost * 100
+                        action = "SELL"
+                        reason = f"移动止盈(峰值{peak_profit_pct:.1f}%)"
+                        sell_price = data['close']
+                        positions_to_close.append((code, sell_price, reason))
+                        continue  # 跳过后续检查
+            
+            # 🔄 保留固定止盈逻辑（当未启用移动止盈时）
+            elif not pos.get('has_taken_profit') and self.take_profit > 0:
                 tp_price = buy_cost * (1 + self.take_profit)
                 if data['high'] >= tp_price:
                     exec_price = max(data['open'], tp_price)
@@ -865,8 +890,8 @@ class StockDataLoader:
 
 
 def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_thresholds=None,
-                strict_mode=True, history_days=250, stop_loss=0.10, take_profit=0.20, delay=0.1,
-                initial_capital=100000):
+                strict_mode=True, history_days=250, stop_loss=0.10, take_profit=0.20, 
+                trailing_stop=0.0, delay=0.1, initial_capital=100000):
     """
     运行回测 (组合模式)
     
@@ -882,7 +907,7 @@ def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_
     print(f"最大持仓: {max_positions}只")
     print(f"初始资金: {initial_capital}")
     print(f"模式: {'严格模式' if strict_mode else '标准模式'}")
-    print(f"止损: {stop_loss*100:.0f}% | 止盈: {take_profit*100:.0f}%")
+    print(f"止损: {stop_loss*100:.0f}% | 止盈: {take_profit*100:.0f}% | 移动止盈: {trailing_stop*100:.0f}%")
     print(f"评测阈值: {quality_thresholds}")
     print("=" * 100)
     
@@ -929,6 +954,7 @@ def run_backtest(board='chinext+star', max_stocks=100, max_positions=5, quality_
             max_stocks=max_positions,
             stop_loss=stop_loss,
             take_profit=take_profit,
+            trailing_stop=trailing_stop,
             strict_mode=strict_mode
         )
         
@@ -1021,6 +1047,7 @@ def main():
     parser.add_argument('--history-days', type=int, default=250, help='历史数据天数')
     parser.add_argument('--stop-loss', type=float, default=0.10, help='止损比例')
     parser.add_argument('--take-profit', type=float, default=0.20, help='动态止盈比例')
+    parser.add_argument('--trailing-stop', type=float, default=0.0, help='移动止盈回落比例 (0=禁用, 推荐0.15)')
     parser.add_argument('--delay', type=float, default=0.1, help='请求间隔')
     
     args = parser.parse_args()
@@ -1064,6 +1091,7 @@ def main():
         history_days=args.history_days,
         stop_loss=args.stop_loss,
         take_profit=args.take_profit,
+        trailing_stop=args.trailing_stop,
         delay=args.delay
     )
 
