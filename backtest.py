@@ -162,6 +162,15 @@ class PortfolioBacktester:
             reason = ""
             buy_cost = pos['cost_price']
             
+            # 计算持有天数（用于渐进式止损和最小持仓过滤）
+            from datetime import datetime as dt
+            try:
+                buy_date = dt.strptime(pos['buy_date'], '%Y-%m-%d')
+                current_date = dt.strptime(date_str, '%Y-%m-%d')
+                hold_days = (current_date - buy_date).days
+            except:
+                hold_days = 0
+            
             if not pos.get('has_taken_profit') and self.take_profit > 0:
                 tp_price = buy_cost * (1 + self.take_profit)
                 if data['high'] >= tp_price:
@@ -173,7 +182,15 @@ class PortfolioBacktester:
             if pos.get('use_breakeven'):
                 stop_price = buy_cost * (1.01) 
             else:
-                stop_price = buy_cost * (1 - self.stop_loss)
+                # 🆕 渐进式止损：根据持有天数调整止损比例
+                if hold_days < 5:
+                    stop_loss_pct = min(self.stop_loss * 1.2, 0.12)  # 前5天放宽20%
+                elif hold_days < 15:
+                    stop_loss_pct = self.stop_loss  # 5-15天正常
+                else:
+                    stop_loss_pct = self.stop_loss * 0.8  # 15天后收紧20%
+                
+                stop_price = buy_cost * (1 - stop_loss_pct)
                 
             if data['low'] <= stop_price:
                 action = "SELL"
@@ -183,9 +200,11 @@ class PortfolioBacktester:
                 else:
                     sell_price = stop_price
             elif data['sell_signal']:
-                action = "SELL"
-                reason = "卖出信号"
-                sell_price = data['close'] 
+                # 🆕 最小持仓天数过滤：持仓不足5天忽略卖出信号
+                if hold_days >= 5:
+                    action = "SELL"
+                    reason = "卖出信号"
+                    sell_price = data['close']
 
             if action == "SELL":
                 positions_to_close.append((code, sell_price, reason))
