@@ -1014,6 +1014,27 @@ def main():
     else:
         quality_thresholds = [int(x.strip()) for x in args.quality_thresholds.split(',')]
     
+    # 警告：非严格模式下使用高阈值会过滤所有信号
+    if not strict_mode and any(q > 0 for q in quality_thresholds):
+        print("\n" + "="*80)
+        print("⚠️  警告: 您正在使用 --no-strict 模式，但设置了质量阈值 > 0")
+        print("="*80)
+        print("在非严格模式下，所有信号的质量分数都是 0，")
+        print(f"使用阈值 {quality_thresholds} 会过滤掉所有买入信号，导致无交易产生。")
+        print("\n建议:")
+        print("  1. 去掉 --no-strict 参数，使用严格模式（启用8因子质量评分）")
+        print("  2. 或者使用 --quality-thresholds 0 (接受所有信号)")
+        print("="*80)
+        
+        # 给用户5秒时间取消
+        import time
+        print("\n将在5秒后继续执行... (按Ctrl+C取消)")
+        try:
+            time.sleep(5)
+        except KeyboardInterrupt:
+            print("\n\n已取消执行。")
+            return
+    
     run_backtest(
         board=args.board,
         max_stocks=args.max_stocks,
