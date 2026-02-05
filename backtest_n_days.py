@@ -1,7 +1,7 @@
 """
 N天延迟回测系统
-发现买入信号后，第N天买入，持有N天后卖出
-支持批量测试不同N值的效果
+发现买入信号后，第buy_delay天买入，持有hold_days天后卖出
+支持批量测试不同参数组合的效果
 """
 import baostock as bs
 import pandas as pd
@@ -19,13 +19,14 @@ class NDayBacktester:
     N天延迟回测引擎
     
     逻辑：
-    - 检测到买入信号后，在第N个交易日买入
-    - 买入后持有N个交易日卖出
-    - N为可配置参数
+    - 检测到买入信号后，在第buy_delay个交易日买入
+    - 买入后持有hold_days个交易日卖出
+    - buy_delay和hold_days可分别配置
     """
     
     def __init__(self, 
-                 n_days: int = 5,
+                 buy_delay: int = 3,
+                 hold_days: int = 5,
                  initial_capital: float = 100000,
                  commission: float = 0.0003,
                  slippage: float = 0.001,
@@ -36,7 +37,8 @@ class NDayBacktester:
         初始化回测引擎
         
         Args:
-            n_days: 延迟天数，信号出现后第N天买入，买入后持有N天卖出
+            buy_delay: 买入延迟天数，信号出现后第buy_delay天买入
+            hold_days: 持有天数，买入后持有hold_days天卖出
             initial_capital: 初始资金
             commission: 手续费率
             slippage: 滑点
@@ -44,7 +46,8 @@ class NDayBacktester:
             strict_mode: 是否使用严格模式
             min_quality: 最低信号质量
         """
-        self.n_days = n_days
+        self.buy_delay = buy_delay
+        self.hold_days = hold_days
         self.initial_capital = initial_capital
         self.commission = commission
         self.slippage = slippage
@@ -95,7 +98,7 @@ class NDayBacktester:
         Returns:
             交易记录列表
         """
-        if stock_data is None or len(stock_data) < self.n_days * 2 + 10:
+        if stock_data is None or len(stock_data) < (self.buy_delay + self.hold_days) + 10:
             return []
         
         try:
@@ -138,7 +141,8 @@ class NDayBacktester:
                             'profit_pct': profit_pct,
                             'hold_days': hold_days,
                             'signal_quality': position['signal_quality'],
-                            'n_days': self.n_days,
+                            'buy_delay': self.buy_delay,
+                            'hold_days': self.hold_days,
                             'exit_reason': 'time_exit'
                         }
                         stock_trades.append(trade)
@@ -158,7 +162,7 @@ class NDayBacktester:
                         
                         if shares >= 100:
                             # 计算计划卖出日期
-                            sell_idx = i + self.n_days
+                            sell_idx = i + self.hold_days
                             if sell_idx < len(dates):
                                 planned_sell_date = dates[sell_idx]
                             else:
@@ -185,8 +189,8 @@ class NDayBacktester:
                         quality = current_row.get('signal_quality', 0) if self.strict_mode else 100
                         
                         if quality >= self.min_quality:
-                            # 计算计划买入日期（第N个交易日）
-                            buy_idx = i + self.n_days
+                            # 计算计划买入日期（第buy_delay个交易日）
+                            buy_idx = i + self.buy_delay
                             if buy_idx < len(dates):
                                 planned_buy_date = dates[buy_idx]
                                 
@@ -222,7 +226,8 @@ class NDayBacktester:
                     'profit_pct': profit_pct,
                     'hold_days': hold_days,
                     'signal_quality': position['signal_quality'],
-                    'n_days': self.n_days,
+                    'buy_delay': self.buy_delay,
+                    'hold_days': self.hold_days,
                     'exit_reason': 'open'
                 }
                 stock_trades.append(trade)
@@ -463,7 +468,8 @@ class StockDataLoader:
         return df
 
 
-def run_n_day_backtest(n_days: int = 5,
+def run_n_day_backtest(buy_delay: int = 3,
+                       hold_days: int = 5,
                        board: str = 'chinext+star',
                        max_stocks: int = 100,
                        strict_mode: bool = True,
@@ -474,7 +480,8 @@ def run_n_day_backtest(n_days: int = 5,
     运行N天延迟回测
     
     Args:
-        n_days: 延迟天数
+        buy_delay: 买入延迟天数，信号出现后第buy_delay天买入
+        hold_days: 持有天数，买入后持有hold_days天卖出
         board: 板块筛选
         max_stocks: 最大股票数量
         strict_mode: 严格模式
@@ -486,7 +493,7 @@ def run_n_day_backtest(n_days: int = 5,
         回测结果字典
     """
     print(f"\n{'='*80}")
-    print(f"N天延迟回测 - N={n_days}")
+    print(f"N天延迟回测 - 买入延迟{buy_delay}天, 持有{hold_days}天")
     print(f"{'='*80}")
     print(f"板块: {board}")
     print(f"股票池: {max_stocks}只")
@@ -501,7 +508,8 @@ def run_n_day_backtest(n_days: int = 5,
     
     # 创建回测引擎
     backtester = NDayBacktester(
-        n_days=n_days,
+        buy_delay=buy_delay,
+        hold_days=hold_days,
         initial_capital=initial_capital,
         strict_mode=strict_mode,
         min_quality=min_quality
@@ -519,7 +527,7 @@ def run_n_day_backtest(n_days: int = 5,
             # 获取股票数据
             df = StockDataLoader.get_stock_data(stock['code'], days=history_days)
             
-            if df is not None and len(df) >= n_days * 2 + 10:
+            if df is not None and len(df) >= (buy_delay + hold_days) + 10:
                 # 执行回测
                 trades = backtester.backtest_stock(stock['code'], stock['name'], df)
                 all_trades.extend(trades)
@@ -533,7 +541,7 @@ def run_n_day_backtest(n_days: int = 5,
     
     # 打印结果
     print(f"\n{'='*80}")
-    print(f"回测结果 (N={n_days})")
+    print(f"回测结果 (买入延迟{buy_delay}天, 持有{hold_days}天)")
     print(f"{'='*80}")
     print(f"总交易次数: {metrics['total_trades']}")
     print(f"盈利次数: {metrics['win_count']}")
@@ -549,24 +557,27 @@ def run_n_day_backtest(n_days: int = 5,
     print(f"{'='*80}\n")
     
     return {
-        'n_days': n_days,
+        'buy_delay': buy_delay,
+        'hold_days': hold_days,
         'metrics': metrics,
         'trades': all_trades,
         'stock_count': len(stock_list)
     }
 
 
-def compare_n_days(n_days_list: List[int] = [1, 3, 5, 7, 10, 15, 20],
+def compare_n_days(buy_delay_list: List[int] = [1, 3, 5],
+                   hold_days_list: List[int] = [5, 10, 15],
                    board: str = 'chinext+star',
                    max_stocks: int = 100,
                    strict_mode: bool = True,
                    min_quality: int = 60,
                    history_days: int = 250) -> pd.DataFrame:
     """
-    对比不同N值的回测效果
+    对比不同参数组合的回测效果（网格搜索）
     
     Args:
-        n_days_list: N值列表
+        buy_delay_list: 买入延迟天数列表
+        hold_days_list: 持有天数列表
         board: 板块筛选
         max_stocks: 最大股票数量
         strict_mode: 严格模式
@@ -577,56 +588,66 @@ def compare_n_days(n_days_list: List[int] = [1, 3, 5, 7, 10, 15, 20],
         对比结果DataFrame
     """
     print(f"\n{'='*80}")
-    print("N值对比回测")
+    print("参数组合对比回测（网格搜索）")
     print(f"{'='*80}")
-    print(f"测试N值: {n_days_list}")
+    print(f"买入延迟天数: {buy_delay_list}")
+    print(f"持有天数: {hold_days_list}")
+    print(f"总组合数: {len(buy_delay_list) * len(hold_days_list)}")
     print(f"股票池: {max_stocks}只")
     print(f"{'='*80}\n")
     
     results = []
+    total_combinations = len(buy_delay_list) * len(hold_days_list)
+    current = 0
     
-    for n in n_days_list:
-        result = run_n_day_backtest(
-            n_days=n,
-            board=board,
-            max_stocks=max_stocks,
-            strict_mode=strict_mode,
-            min_quality=min_quality,
-            history_days=history_days
-        )
-        
-        metrics = result['metrics']
-        results.append({
-            'N值': n,
-            '交易次数': metrics['total_trades'],
-            '胜率(%)': round(metrics['win_rate'], 2),
-            '平均收益(%)': round(metrics['avg_profit'], 2),
-            '总收益(%)': round(metrics['total_return'], 2),
-            '最大盈利(%)': round(metrics['max_profit'], 2),
-            '最大亏损(%)': round(metrics['min_profit'], 2),
-            '盈亏比': round(metrics['profit_factor'], 2),
-            '最大回撤(%)': round(metrics['max_drawdown'], 2),
-            '平均持有(天)': round(metrics['avg_hold_days'], 1)
-        })
+    for buy_delay in buy_delay_list:
+        for hold_days in hold_days_list:
+            current += 1
+            print(f"\n[{current}/{total_combinations}] 测试组合: 买入延迟{buy_delay}天, 持有{hold_days}天")
+            
+            result = run_n_day_backtest(
+                buy_delay=buy_delay,
+                hold_days=hold_days,
+                board=board,
+                max_stocks=max_stocks,
+                strict_mode=strict_mode,
+                min_quality=min_quality,
+                history_days=history_days
+            )
+            
+            metrics = result['metrics']
+            results.append({
+                '买入延迟': buy_delay,
+                '持有天数': hold_days,
+                '交易次数': metrics['total_trades'],
+                '胜率(%)': round(metrics['win_rate'], 2),
+                '平均收益(%)': round(metrics['avg_profit'], 2),
+                '总收益(%)': round(metrics['total_return'], 2),
+                '最大盈利(%)': round(metrics['max_profit'], 2),
+                '最大亏损(%)': round(metrics['min_profit'], 2),
+                '盈亏比': round(metrics['profit_factor'], 2),
+                '最大回撤(%)': round(metrics['max_drawdown'], 2),
+                '平均持有(天)': round(metrics['avg_hold_days'], 1)
+            })
     
     # 创建对比表格
     df_comparison = pd.DataFrame(results)
     
     print("\n" + "="*80)
-    print("N值对比结果")
+    print("参数组合对比结果")
     print("="*80)
     print(df_comparison.to_string(index=False))
     print("="*80)
     
-    # 找出最佳N值
+    # 找出最佳组合
     best_by_return = df_comparison.loc[df_comparison['总收益(%)'].idxmax()]
     best_by_winrate = df_comparison.loc[df_comparison['胜率(%)'].idxmax()]
     best_by_factor = df_comparison.loc[df_comparison['盈亏比'].idxmax()]
     
     print("\n最佳表现:")
-    print(f"  最高总收益: N={int(best_by_return['N值'])} ({best_by_return['总收益(%)']}%)")
-    print(f"  最高胜率: N={int(best_by_winrate['N值'])} ({best_by_winrate['胜率(%)']}%)")
-    print(f"  最佳盈亏比: N={int(best_by_factor['N值'])} ({best_by_factor['盈亏比']})")
+    print(f"  最高总收益: 买入延迟{int(best_by_return['买入延迟'])}天, 持有{int(best_by_return['持有天数'])}天 ({best_by_return['总收益(%)']}%)")
+    print(f"  最高胜率: 买入延迟{int(best_by_winrate['买入延迟'])}天, 持有{int(best_by_winrate['持有天数'])}天 ({best_by_winrate['胜率(%)']}%)")
+    print(f"  最佳盈亏比: 买入延迟{int(best_by_factor['买入延迟'])}天, 持有{int(best_by_factor['持有天数'])}天 ({best_by_factor['盈亏比']})")
     
     return df_comparison
 
@@ -634,23 +655,27 @@ def compare_n_days(n_days_list: List[int] = [1, 3, 5, 7, 10, 15, 20],
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='N天延迟回测系统')
-    parser.add_argument('--n', type=int, default=5, help='延迟天数（默认5）')
-    parser.add_argument('--n-list', type=int, nargs='+', help='N值列表（用于对比模式）')
+    parser.add_argument('--buy-delay', type=int, default=3, help='买入延迟天数，信号出现后第N天买入（默认3）')
+    parser.add_argument('--hold-days', type=int, default=5, help='持有天数，买入后持有N天卖出（默认5）')
+    parser.add_argument('--buy-delay-list', type=int, nargs='+', help='买入延迟天数列表（用于对比模式）')
+    parser.add_argument('--hold-days-list', type=int, nargs='+', help='持有天数列表（用于对比模式）')
     parser.add_argument('--board', type=str, default='chinext+star', help='板块筛选')
     parser.add_argument('--max-stocks', type=int, default=100, help='最大股票数量')
     parser.add_argument('--strict', action='store_true', help='使用严格模式')
     parser.add_argument('--min-quality', type=int, default=60, help='最低信号质量')
     parser.add_argument('--history-days', type=int, default=250, help='历史数据天数')
-    parser.add_argument('--compare', action='store_true', help='对比模式（测试多个N值）')
+    parser.add_argument('--compare', action='store_true', help='对比模式（网格搜索测试多个参数组合）')
     parser.add_argument('--output', type=str, help='输出结果到JSON文件')
     
     args = parser.parse_args()
     
-    if args.compare or args.n_list:
-        # 对比模式
-        n_list = args.n_list if args.n_list else [1, 3, 5, 7, 10, 15, 20]
+    if args.compare or args.buy_delay_list or args.hold_days_list:
+        # 对比模式（网格搜索）
+        buy_delay_list = args.buy_delay_list if args.buy_delay_list else [1, 3, 5]
+        hold_days_list = args.hold_days_list if args.hold_days_list else [5, 10, 15]
         results_df = compare_n_days(
-            n_days_list=n_list,
+            buy_delay_list=buy_delay_list,
+            hold_days_list=hold_days_list,
             board=args.board,
             max_stocks=args.max_stocks,
             strict_mode=args.strict,
@@ -662,9 +687,10 @@ def main():
             results_df.to_json(args.output, orient='records', force_ascii=False, indent=2)
             print(f"\n结果已保存到: {args.output}")
     else:
-        # 单N值模式
+        # 单参数组合模式
         result = run_n_day_backtest(
-            n_days=args.n,
+            buy_delay=args.buy_delay,
+            hold_days=args.hold_days,
             board=args.board,
             max_stocks=args.max_stocks,
             strict_mode=args.strict,
@@ -676,7 +702,8 @@ def main():
             # 保存详细结果
             output_data = {
                 'config': {
-                    'n_days': args.n,
+                    'buy_delay': args.buy_delay,
+                    'hold_days': args.hold_days,
                     'board': args.board,
                     'max_stocks': args.max_stocks,
                     'strict_mode': args.strict,
